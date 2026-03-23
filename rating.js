@@ -194,6 +194,47 @@
 		return movieDataFromCardDomFallback(cardEl);
 	}
 
+	/**
+	 * Lampa fires the custom "visible" event only on .layer--visible nodes (see core/layer.js), not on .card.
+	 * Catalog cards therefore never received our listener — we drive KP from periodic scans instead.
+	 */
+	var _kpCardScanTimer = null;
+	function scheduleCatalogCardScan(root) {
+		if (_kpCardScanTimer) clearTimeout(_kpCardScanTimer);
+		_kpCardScanTimer = setTimeout(function () {
+			_kpCardScanTimer = null;
+			scanCatalogCardsForKinopoisk(root);
+		}, 280);
+	}
+
+	function scanCatalogCardsForKinopoisk(root) {
+		var el = root;
+		if (!el) el = document.body;
+		if (el && el.jquery) el = el[0];
+		if (!el || !el.querySelectorAll) return;
+		var cards = el.querySelectorAll('.card');
+		for (var i = 0; i < cards.length; i++) {
+			var c = cards[i];
+			if (c.classList.contains('card--parser')) continue;
+			var data = getCardMovieData(c);
+			if (!data || !data.id) continue;
+			rating_kp_imdb(data, { cardElement: c });
+		}
+	}
+
+	function patchLayerVisibleForCatalog() {
+		if (window._kpLayerVisiblePatched) return;
+		var Layer = window.Lampa && Lampa.Layer;
+		if (!Layer || typeof Layer.visible !== 'function') return;
+		window._kpLayerVisiblePatched = true;
+		var orig = Layer.visible;
+		Layer.visible = function (where) {
+			var ret = orig.apply(this, arguments);
+			scheduleCatalogCardScan(where || document.body);
+			return ret;
+		};
+	}
+
 	function reorderFullPageRatingsKpFirst($root) {
 		if (!$root || !$root.find) return;
 		var $kp = $root.find('.rate--kp').first();
@@ -465,51 +506,34 @@
 		}
 	}
 
-	function bindCardRating(cardEl) {
-		if (!cardEl || cardEl.nodeType !== 1 || !cardEl.classList.contains('card')) return;
-		if (cardEl.dataset.kpRatingPluginBound) return;
-		cardEl.dataset.kpRatingPluginBound = '1';
-
-		function runKpForCard() {
-			var data = getCardMovieData(cardEl);
-			if (!data || !data.id) return;
-			rating_kp_imdb(data, { cardElement: cardEl });
-		}
-
-		cardEl.addEventListener('visible', function () {
-			// Defer: Scroll.append mirror runs same tick as append; wait for card_data on DOM
-			setTimeout(runKpForCard, 48);
-			// If mirror was late, retry once with real TMDB id (avoids wrong kp-grid- cache key)
-			setTimeout(function () {
-				if (cardEl.card_data && cardEl.card_data.id) {
-					rating_kp_imdb(cardEl.card_data, { cardElement: cardEl });
-				}
-			}, 220);
-		});
-	}
-
-	function scanNodeForCards(node) {
-		if (!node || node.nodeType !== 1) return;
-		if (node.classList.contains('card')) bindCardRating(node);
-		var q = node.querySelectorAll && node.querySelectorAll('.card');
-		if (q) {
-			for (var i = 0; i < q.length; i++) bindCardRating(q[i]);
-		}
-	}
-
 	function startPlugin() {
 		window.rating_plugin = true;
 		if (isDebug()) return;
 
 		patchScrollAppendMirrorCardData();
+		patchLayerVisibleForCatalog();
 
-		scanNodeForCards(document.body);
+		scheduleCatalogCardScan(document.body);
+		setTimeout(function () {
+			patchLayerVisibleForCatalog();
+			scheduleCatalogCardScan(document.body);
+		}, 600);
+		setTimeout(function () {
+			patchLayerVisibleForCatalog();
+			scheduleCatalogCardScan(document.body);
+		}, 2000);
 
-		new MutationObserver(function (records) {
-			for (var i = 0; i < records.length; i++) {
-				var nodes = records[i].addedNodes;
-				for (var j = 0; j < nodes.length; j++) scanNodeForCards(nodes[j]);
-			}
+		if (window.Lampa && Lampa.Listener) {
+			Lampa.Listener.follow('app', function (e) {
+				if (e.type === 'ready') {
+					patchLayerVisibleForCatalog();
+					scheduleCatalogCardScan(document.body);
+				}
+			});
+		}
+
+		new MutationObserver(function () {
+			scheduleCatalogCardScan(document.body);
 		}).observe(document.body, { childList: true, subtree: true });
 
 		Lampa.Listener.follow('full', function (e) {
