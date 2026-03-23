@@ -59,9 +59,15 @@
 	}
 
 	function hasKpCache(movieId) {
+		return !!readKpCacheEntry(movieId);
+	}
+
+	function readKpCacheEntry(movieId) {
 		var ts = new Date().getTime();
 		var cache = Lampa.Storage.cache('kp_rating', 500, {});
-		return !!(cache[movieId] && (ts - cache[movieId].timestamp) <= CACHE_TIME_MS);
+		var e = cache[movieId];
+		if (!e || (ts - e.timestamp) > CACHE_TIME_MS) return null;
+		return e;
 	}
 
 	function hideTmdbRow($root) {
@@ -199,12 +205,36 @@
 	 * Catalog cards therefore never received our listener — we drive KP from periodic scans instead.
 	 */
 	var _kpCardScanTimer = null;
-	function scheduleCatalogCardScan(root) {
+	var CATALOG_SCAN_DEBOUNCE_MS = 72;
+	var CATALOG_LAYER_MIRROR_MS = 42;
+
+	function tryApplyCachedKpToCard(cardEl, movieId) {
+		var e = readKpCacheEntry(movieId);
+		if (!e) return false;
+		var kp = parseFloat(e.kp);
+		if (isNaN(kp) || kp <= 0) return false;
+		applyCardVoteKinopoisk(cardEl, kp.toFixed(1));
+		return true;
+	}
+
+	function shouldSkipNetworkForMovieId(movieId) {
+		var e = readKpCacheEntry(movieId);
+		if (!e) return false;
+		var kp = parseFloat(e.kp);
+		return !isNaN(kp) && kp <= 0;
+	}
+
+	function scheduleCatalogCardScan(root, debounceMs) {
+		if (debounceMs === undefined) debounceMs = CATALOG_SCAN_DEBOUNCE_MS;
 		if (_kpCardScanTimer) clearTimeout(_kpCardScanTimer);
+		if (debounceMs <= 0) {
+			scanCatalogCardsForKinopoisk(root);
+			return;
+		}
 		_kpCardScanTimer = setTimeout(function () {
 			_kpCardScanTimer = null;
 			scanCatalogCardsForKinopoisk(root);
-		}, 280);
+		}, debounceMs);
 	}
 
 	function scanCatalogCardsForKinopoisk(root) {
@@ -218,8 +248,27 @@
 			if (c.classList.contains('card--parser')) continue;
 			var data = getCardMovieData(c);
 			if (!data || !data.id) continue;
+			var mid = data.id;
+			if (tryApplyCachedKpToCard(c, mid)) continue;
+			if (shouldSkipNetworkForMovieId(mid)) continue;
+			var inflight = c.dataset.kpInflightId;
+			if (inflight === String(mid)) continue;
+			c.dataset.kpInflightId = String(mid);
 			rating_kp_imdb(data, { cardElement: c });
 		}
+	}
+
+	function mutationAddsCards(mutations) {
+		for (var i = 0; i < mutations.length; i++) {
+			var nodes = mutations[i].addedNodes;
+			for (var j = 0; j < nodes.length; j++) {
+				var n = nodes[j];
+				if (n.nodeType !== 1) continue;
+				if (n.classList && n.classList.contains('card')) return true;
+				if (n.querySelector && n.querySelector('.card')) return true;
+			}
+		}
+		return false;
 	}
 
 	function patchLayerVisibleForCatalog() {
@@ -230,7 +279,19 @@
 		var orig = Layer.visible;
 		Layer.visible = function (where) {
 			var ret = orig.apply(this, arguments);
-			scheduleCatalogCardScan(where || document.body);
+			var scope = where || document.body;
+			function runScan() {
+				scanCatalogCardsForKinopoisk(scope);
+			}
+			if (typeof requestAnimationFrame === 'function') {
+				requestAnimationFrame(function () {
+					runScan();
+					setTimeout(runScan, CATALOG_LAYER_MIRROR_MS);
+				});
+			} else {
+				runScan();
+				setTimeout(runScan, CATALOG_LAYER_MIRROR_MS);
+			}
 			return ret;
 		};
 	}
@@ -454,7 +515,10 @@
 		}
 
 		function showError(error) {
-			if (cardElement) return;
+			if (cardElement) {
+				if (cardElement.dataset) delete cardElement.dataset.kpInflightId;
+				return;
+			}
 			Lampa.Noty.show('Рейтинг KP: ' + error);
 		}
 
@@ -494,6 +558,7 @@
 
 			if (cardElement) {
 				applyCardVoteKinopoisk(cardElement, kp_rating);
+				if (cardElement.dataset) delete cardElement.dataset.kpInflightId;
 				return;
 			}
 
@@ -513,27 +578,23 @@
 		patchScrollAppendMirrorCardData();
 		patchLayerVisibleForCatalog();
 
-		scheduleCatalogCardScan(document.body);
+		scheduleCatalogCardScan(document.body, 0);
 		setTimeout(function () {
 			patchLayerVisibleForCatalog();
-			scheduleCatalogCardScan(document.body);
-		}, 600);
-		setTimeout(function () {
-			patchLayerVisibleForCatalog();
-			scheduleCatalogCardScan(document.body);
-		}, 2000);
+			scheduleCatalogCardScan(document.body, 0);
+		}, 180);
 
 		if (window.Lampa && Lampa.Listener) {
 			Lampa.Listener.follow('app', function (e) {
 				if (e.type === 'ready') {
 					patchLayerVisibleForCatalog();
-					scheduleCatalogCardScan(document.body);
+					scheduleCatalogCardScan(document.body, 0);
 				}
 			});
 		}
 
-		new MutationObserver(function () {
-			scheduleCatalogCardScan(document.body);
+		new MutationObserver(function (mutations) {
+			if (mutationAddsCards(mutations)) scheduleCatalogCardScan(document.body);
 		}).observe(document.body, { childList: true, subtree: true });
 
 		Lampa.Listener.follow('full', function (e) {
