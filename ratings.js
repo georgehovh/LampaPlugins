@@ -105,18 +105,25 @@
 		Lampa.SettingsApi.addParam({
 			component: 'ratings_kp_plugin',
 			param: {
-				name: 'rating_url',
-				type: 'input',
-				placeholder: EMBEDDED_URL,
-				values: Lampa.Storage.get('rating_url', ''),
-				default: ''
+				name: 'rating_cache_time',
+				type: 'select',
+				values: {
+					'1': '1 hour',
+					'6': '6 hours',
+					'12': '12 hours',
+					'24': '24 hours',
+					'48': '48 hours',
+					'72': '72 hours',
+					'168': '1 week'
+				},
+				default: DEFAULT_CONFIG.cache_time.toString()
 			},
 			field: {
-				name: 'Kinopoisk API base URL',
-				description: 'Leave empty to use the built-in default (' + EMBEDDED_URL + ')'
+				name: 'Cache duration',
+				description: 'How long to keep rating data in local storage'
 			},
 			onChange: function (value) {
-				Lampa.Storage.set('rating_url', value ? String(value).trim() : '');
+				Lampa.Storage.set('rating_cache_time', parseInt(value, 10) || DEFAULT_CONFIG.cache_time);
 			}
 		});
 
@@ -141,6 +148,24 @@
 		Lampa.SettingsApi.addParam({
 			component: 'ratings_kp_plugin',
 			param: {
+				name: 'rating_url',
+				type: 'input',
+				placeholder: EMBEDDED_URL,
+				values: Lampa.Storage.get('rating_url', ''),
+				default: ''
+			},
+			field: {
+				name: 'Kinopoisk API base URL',
+				description: 'Leave empty to use the built-in default (' + EMBEDDED_URL + ')'
+			},
+			onChange: function (value) {
+				Lampa.Storage.set('rating_url', value ? String(value).trim() : '');
+			}
+		});
+
+		Lampa.SettingsApi.addParam({
+			component: 'ratings_kp_plugin',
+			param: {
 				name: 'rating_api_key',
 				type: 'input',
 				placeholder: '(built-in if empty)',
@@ -153,31 +178,6 @@
 			},
 			onChange: function (value) {
 				Lampa.Storage.set('rating_api_key', value ? String(value).trim() : '');
-			}
-		});
-
-		Lampa.SettingsApi.addParam({
-			component: 'ratings_kp_plugin',
-			param: {
-				name: 'rating_cache_time',
-				type: 'select',
-				values: {
-					'1': '1 hour',
-					'6': '6 hours',
-					'12': '12 hours',
-					'24': '24 hours',
-					'48': '48 hours',
-					'72': '72 hours',
-					'168': '1 week'
-				},
-				default: DEFAULT_CONFIG.cache_time.toString()
-			},
-			field: {
-				name: 'Cache duration',
-				description: 'How long to keep rating data in local storage'
-			},
-			onChange: function (value) {
-				Lampa.Storage.set('rating_cache_time', parseInt(value, 10) || DEFAULT_CONFIG.cache_time);
 			}
 		});
 	}
