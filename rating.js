@@ -83,6 +83,84 @@
 		}
 	}
 
+	/**
+	 * New Lampa stores movie data on the jQuery wrapper (this.html.card_data), not on the DOM node.
+	 * Catalog uses Scroll.append → appendChild, not jQuery.fn.append — patch Scroll.append on each .scroll.
+	 */
+	function patchScrollAppendMirrorCardData() {
+		if (window._kpScrollAppendPatched) return;
+		window._kpScrollAppendPatched = true;
+
+		function patchOne(scrollEl) {
+			if (!scrollEl || !scrollEl.Scroll || !scrollEl.Scroll.append || scrollEl.Scroll._kpMirrorPatched) return;
+			var scr = scrollEl.Scroll;
+			var oldAppend = scr.append;
+			scr.append = function (object) {
+				if (object && object.jquery && object[0] && object.card_data && !object[0].card_data) {
+					object[0].card_data = object.card_data;
+				}
+				return oldAppend.call(this, object);
+			};
+			scr._kpMirrorPatched = true;
+		}
+
+		var patchTimer = null;
+		function patchAllScrolls() {
+			var nodes = document.querySelectorAll('.scroll');
+			for (var i = 0; i < nodes.length; i++) patchOne(nodes[i]);
+		}
+
+		function schedulePatchScrolls() {
+			if (patchTimer) clearTimeout(patchTimer);
+			patchTimer = setTimeout(function () {
+				patchTimer = null;
+				patchAllScrolls();
+			}, 50);
+		}
+
+		patchAllScrolls();
+		setTimeout(patchAllScrolls, 300);
+		setTimeout(patchAllScrolls, 1500);
+
+		var mo = new MutationObserver(function () {
+			schedulePatchScrolls();
+		});
+		if (document.body) mo.observe(document.body, { childList: true, subtree: true });
+
+		// jQuery paths (if any) still get a mirror
+		var $jq = window.jQuery || window.$;
+		if ($jq && $jq.fn && !window._kpJqueryAppendPatched) {
+			window._kpJqueryAppendPatched = true;
+			var origAppend = $jq.fn.append;
+			$jq.fn.append = function () {
+				for (var j = 0; j < arguments.length; j++) {
+					var arg = arguments[j];
+					if (arg && arg.jquery && arg[0] && arg.card_data && !arg[0].card_data) {
+						arg[0].card_data = arg.card_data;
+					}
+				}
+				return origAppend.apply(this, arguments);
+			};
+		}
+	}
+
+	function getCardMovieData(cardEl) {
+		if (!cardEl) return null;
+		if (cardEl.card_data) return cardEl.card_data;
+		var $c = typeof jQuery !== 'undefined' ? jQuery(cardEl) : null;
+		if ($c && $c.length && $c[0] && $c[0].card_data) return $c[0].card_data;
+		return null;
+	}
+
+	function reorderFullPageRatingsKpFirst($root) {
+		if (!$root || !$root.find) return;
+		var $kp = $root.find('.rate--kp').first();
+		var $imdb = $root.find('.rate--imdb').first();
+		if ($kp.length && $imdb.length && $kp[0] !== $imdb[0]) {
+			$kp.insertBefore($imdb);
+		}
+	}
+
 	function rating_kp_imdb(card, options) {
 		options = options || {};
 		var fullRender = options.render;
@@ -341,6 +419,7 @@
 			$('.rate--tmdb', render).addClass('hide');
 			$('.rate--imdb', render).removeClass('hide').find('> div').eq(0).text(imdb_rating);
 			$('.rate--kp', render).removeClass('hide').find('> div').eq(0).text(kp_rating);
+			reorderFullPageRatingsKpFirst($(render));
 		}
 	}
 
@@ -349,7 +428,7 @@
 		if (cardEl.dataset.kpRatingPluginBound) return;
 		cardEl.dataset.kpRatingPluginBound = '1';
 		cardEl.addEventListener('visible', function () {
-			var data = cardEl.card_data;
+			var data = getCardMovieData(cardEl);
 			if (!data || !data.id) return;
 			rating_kp_imdb(data, { cardElement: cardEl });
 		});
@@ -368,6 +447,8 @@
 		window.rating_plugin = true;
 		if (isDebug()) return;
 
+		patchScrollAppendMirrorCardData();
+
 		scanNodeForCards(document.body);
 
 		new MutationObserver(function (records) {
@@ -380,6 +461,7 @@
 		Lampa.Listener.follow('full', function (e) {
 			if (e.type == 'build' && e.name == 'start' && e.body) {
 				hideTmdbRow(e.body);
+				reorderFullPageRatingsKpFirst(e.body);
 			}
 			if (e.type == 'complite') {
 				var render = e.object.activity.render();
