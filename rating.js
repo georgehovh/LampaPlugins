@@ -74,10 +74,19 @@
 		if ($root && $root.find) $root.find('.rate--tmdb').addClass('hide');
 	}
 
+	function formatRatingDisplay(val) {
+		if (val === null || val === undefined || val === '') return '0';
+		var n = parseFloat(val);
+		if (isNaN(n) || !isFinite(n)) return '0';
+		if (n >= 10) return '10';
+		if (parseFloat(n.toFixed(1)) === 0) return '0';
+		return n.toFixed(1);
+	}
+
 	function applyCardVoteKinopoisk(cardEl, kpText) {
 		var v = parseFloat(kpText);
 		if (isNaN(v) || v <= 0) return;
-		var display = v >= 10 ? '10' : v.toFixed(1);
+		var display = formatRatingDisplay(kpText);
 		var voteEl = cardEl.querySelector('.card__vote');
 		var view = cardEl.querySelector('.card__view');
 		if (voteEl) voteEl.textContent = display;
@@ -213,7 +222,7 @@
 		if (!e) return false;
 		var kp = parseFloat(e.kp);
 		if (isNaN(kp) || kp <= 0) return false;
-		applyCardVoteKinopoisk(cardEl, kp.toFixed(1));
+		applyCardVoteKinopoisk(cardEl, kp);
 		return true;
 	}
 
@@ -553,8 +562,8 @@
 
 		function _showRating(data) {
 			if (!data) return;
-			var kp_rating = !isNaN(data.kp) && data.kp !== null ? parseFloat(data.kp).toFixed(1) : '0.0';
-			var imdb_rating = !isNaN(data.imdb) && data.imdb !== null ? parseFloat(data.imdb).toFixed(1) : '0.0';
+			var kp_rating = formatRatingDisplay(data.kp);
+			var imdb_rating = formatRatingDisplay(data.imdb);
 
 			if (cardElement) {
 				applyCardVoteKinopoisk(cardElement, kp_rating);
