@@ -91,36 +91,54 @@
 		if (window._kpScrollAppendPatched) return;
 		window._kpScrollAppendPatched = true;
 
+		function mirrorCardDataOntoDom(object) {
+			if (!object || !object[0] || !object.card_data) return;
+			if (!object[0].card_data) object[0].card_data = object.card_data;
+		}
+
 		function patchOne(scrollEl) {
 			if (!scrollEl || !scrollEl.Scroll || !scrollEl.Scroll.append || scrollEl.Scroll._kpMirrorPatched) return;
 			var scr = scrollEl.Scroll;
 			var oldAppend = scr.append;
 			scr.append = function (object) {
-				if (object && object.jquery && object[0] && object.card_data && !object[0].card_data) {
-					object[0].card_data = object.card_data;
-				}
+				// Do not rely on object.jquery — Zepto/minified builds may omit it; jQuery-like has [0] + card_data
+				mirrorCardDataOntoDom(object);
 				return oldAppend.call(this, object);
 			};
 			scr._kpMirrorPatched = true;
 		}
 
 		var patchTimer = null;
-		function patchAllScrolls() {
+		function patchScrollRootsFromSelector() {
 			var nodes = document.querySelectorAll('.scroll');
 			for (var i = 0; i < nodes.length; i++) patchOne(nodes[i]);
+		}
+
+		function patchScrollRootsDeepScanOnce() {
+			var all = document.getElementsByTagName('*');
+			var max = Math.min(all.length, 8000);
+			for (var j = 0; j < max; j++) {
+				var el = all[j];
+				if (el.Scroll && el.Scroll.append) patchOne(el);
+			}
 		}
 
 		function schedulePatchScrolls() {
 			if (patchTimer) clearTimeout(patchTimer);
 			patchTimer = setTimeout(function () {
 				patchTimer = null;
-				patchAllScrolls();
+				patchScrollRootsFromSelector();
 			}, 50);
 		}
 
-		patchAllScrolls();
-		setTimeout(patchAllScrolls, 300);
-		setTimeout(patchAllScrolls, 1500);
+		patchScrollRootsFromSelector();
+		patchScrollRootsDeepScanOnce();
+		setTimeout(patchScrollRootsFromSelector, 300);
+		setTimeout(function () {
+			patchScrollRootsFromSelector();
+			patchScrollRootsDeepScanOnce();
+		}, 1500);
+		setTimeout(patchScrollRootsDeepScanOnce, 4000);
 
 		var mo = new MutationObserver(function () {
 			schedulePatchScrolls();
@@ -135,7 +153,7 @@
 			$jq.fn.append = function () {
 				for (var j = 0; j < arguments.length; j++) {
 					var arg = arguments[j];
-					if (arg && arg.jquery && arg[0] && arg.card_data && !arg[0].card_data) {
+					if (arg && arg[0] && arg.card_data && !arg[0].card_data) {
 						arg[0].card_data = arg.card_data;
 					}
 				}
@@ -144,12 +162,36 @@
 		}
 	}
 
+	function movieDataFromCardDomFallback(cardEl) {
+		var titleEl = cardEl.querySelector('.card__title');
+		var ageEl = cardEl.querySelector('.card__age');
+		var title = titleEl ? titleEl.textContent.trim() : '';
+		if (!title) return null;
+		var yearStr = ageEl ? (ageEl.textContent || '').trim().slice(0, 4) : '';
+		var hashFn = Lampa.Utils && Lampa.Utils.hash ? Lampa.Utils.hash : function (s) {
+			var h = 0;
+			for (var i = 0; i < s.length; i++) h = ((h << 5) - h) + s.charCodeAt(i) | 0;
+			return String(h);
+		};
+		var sid = 'kp-grid-' + hashFn(title + '|' + yearStr);
+		return {
+			id: sid,
+			title: title,
+			release_date: /^\d{4}$/.test(yearStr) ? yearStr + '-01-01' : '0000',
+			first_air_date: null,
+			last_air_date: null,
+			original_title: '',
+			original_name: '',
+			imdb_id: null
+		};
+	}
+
 	function getCardMovieData(cardEl) {
 		if (!cardEl) return null;
 		if (cardEl.card_data) return cardEl.card_data;
 		var $c = typeof jQuery !== 'undefined' ? jQuery(cardEl) : null;
 		if ($c && $c.length && $c[0] && $c[0].card_data) return $c[0].card_data;
-		return null;
+		return movieDataFromCardDomFallback(cardEl);
 	}
 
 	function reorderFullPageRatingsKpFirst($root) {
@@ -427,10 +469,22 @@
 		if (!cardEl || cardEl.nodeType !== 1 || !cardEl.classList.contains('card')) return;
 		if (cardEl.dataset.kpRatingPluginBound) return;
 		cardEl.dataset.kpRatingPluginBound = '1';
-		cardEl.addEventListener('visible', function () {
+
+		function runKpForCard() {
 			var data = getCardMovieData(cardEl);
 			if (!data || !data.id) return;
 			rating_kp_imdb(data, { cardElement: cardEl });
+		}
+
+		cardEl.addEventListener('visible', function () {
+			// Defer: Scroll.append mirror runs same tick as append; wait for card_data on DOM
+			setTimeout(runKpForCard, 48);
+			// If mirror was late, retry once with real TMDB id (avoids wrong kp-grid- cache key)
+			setTimeout(function () {
+				if (cardEl.card_data && cardEl.card_data.id) {
+					rating_kp_imdb(cardEl.card_data, { cardElement: cardEl });
+				}
+			}, 220);
 		});
 	}
 
