@@ -3,10 +3,6 @@
 
 	var CACHE_TIME_MS = 60 * 60 * 24 * 1000;
 
-	function startsWith(str, searchString) {
-		return str.lastIndexOf(searchString, 0) === 0;
-	}
-
 	function endsWith(str, searchString) {
 		var start = str.length - searchString.length;
 		if (start < 0) return false;
@@ -49,6 +45,8 @@
 		return result;
 	}
 
+	var KP_API_KEY = decodeSecret([85, 4, 115, 118, 107, 125, 10, 70, 85, 67, 82, 14, 32, 110, 102, 43, 9, 19, 85, 73, 4, 83, 33, 110, 52, 44, 92, 21, 72, 22, 87, 1, 118, 32, 100, 127], atob('X0tQM3Bhc3N3b3Jk'));
+
 	function isDebug() {
 		var res = false;
 		var origin = window.location.origin || '';
@@ -62,16 +60,44 @@
 		return !!readKpCacheEntry(movieId);
 	}
 
-	function readKpCacheEntry(movieId) {
+	function readKpCacheEntry(movieId, cacheMap) {
 		var ts = new Date().getTime();
-		var cache = Lampa.Storage.cache('kp_rating', 500, {});
+		var cache = cacheMap || Lampa.Storage.cache('kp_rating', 500, {});
 		var e = cache[movieId];
 		if (!e || (ts - e.timestamp) > CACHE_TIME_MS) return null;
 		return e;
 	}
 
-	function hideTmdbRow($root) {
-		if ($root && $root.find) $root.find('.rate--tmdb').addClass('hide');
+	function getCatalogScanRoot() {
+		var lv = document.querySelector('.layer--visible');
+		if (lv && lv.querySelectorAll) return lv;
+		return document.body;
+	}
+
+	function tmdbVoteAverage(card) {
+		if (!card) return NaN;
+		var v = card.vote_average;
+		if (v === undefined || v === null || v === '') v = card.vote;
+		if (v === undefined || v === null || v === '') return NaN;
+		var n = parseFloat(v);
+		return isNaN(n) ? NaN : n;
+	}
+
+	function hasPositiveRating(val) {
+		var n = parseFloat(val);
+		return !isNaN(n) && n > 0;
+	}
+
+	/**
+	 * Poster / single-badge: Kinopoisk → IMDb → TMDB (vote_average).
+	 * Returns formatted string or null if none.
+	 */
+	function pickPosterRating(data, card) {
+		if (data && hasPositiveRating(data.kp)) return formatRatingDisplay(data.kp);
+		if (data && hasPositiveRating(data.imdb)) return formatRatingDisplay(data.imdb);
+		var t = tmdbVoteAverage(card);
+		if (t > 0) return formatRatingDisplay(t);
+		return null;
 	}
 
 	function formatRatingDisplay(val) {
@@ -83,10 +109,8 @@
 		return n.toFixed(1);
 	}
 
-	function applyCardVoteKinopoisk(cardEl, kpText) {
-		var v = parseFloat(kpText);
-		if (isNaN(v) || v <= 0) return;
-		var display = formatRatingDisplay(kpText);
+	function setCardVoteText(cardEl, display) {
+		if (!cardEl || !display) return;
 		var voteEl = cardEl.querySelector('.card__vote');
 		var view = cardEl.querySelector('.card__view');
 		if (voteEl) voteEl.textContent = display;
@@ -96,6 +120,12 @@
 			ve.textContent = display;
 			view.appendChild(ve);
 		}
+	}
+
+	function applyCardPosterRating(cardEl, data, cardMovieData) {
+		var display = pickPosterRating(data, cardMovieData || getCardMovieData(cardEl));
+		if (!display) return;
+		setCardVoteText(cardEl, display);
 	}
 
 	/**
@@ -217,20 +247,11 @@
 	var CATALOG_SCAN_DEBOUNCE_MS = 72;
 	var CATALOG_LAYER_MIRROR_MS = 42;
 
-	function tryApplyCachedKpToCard(cardEl, movieId) {
-		var e = readKpCacheEntry(movieId);
+	function tryApplyCachedRatingToCard(cardEl, movieId, cardData, cacheMap) {
+		var e = readKpCacheEntry(movieId, cacheMap);
 		if (!e) return false;
-		var kp = parseFloat(e.kp);
-		if (isNaN(kp) || kp <= 0) return false;
-		applyCardVoteKinopoisk(cardEl, kp);
+		applyCardPosterRating(cardEl, e, cardData || getCardMovieData(cardEl));
 		return true;
-	}
-
-	function shouldSkipNetworkForMovieId(movieId) {
-		var e = readKpCacheEntry(movieId);
-		if (!e) return false;
-		var kp = parseFloat(e.kp);
-		return !isNaN(kp) && kp <= 0;
 	}
 
 	function scheduleCatalogCardScan(root, debounceMs) {
@@ -251,6 +272,7 @@
 		if (!el) el = document.body;
 		if (el && el.jquery) el = el[0];
 		if (!el || !el.querySelectorAll) return;
+		var kpCache = Lampa.Storage.cache('kp_rating', 500, {});
 		var cards = el.querySelectorAll('.card');
 		for (var i = 0; i < cards.length; i++) {
 			var c = cards[i];
@@ -258,8 +280,7 @@
 			var data = getCardMovieData(c);
 			if (!data || !data.id) continue;
 			var mid = data.id;
-			if (tryApplyCachedKpToCard(c, mid)) continue;
-			if (shouldSkipNetworkForMovieId(mid)) continue;
+			if (tryApplyCachedRatingToCard(c, mid, data, kpCache)) continue;
 			var inflight = c.dataset.kpInflightId;
 			if (inflight === String(mid)) continue;
 			c.dataset.kpInflightId = String(mid);
@@ -288,7 +309,7 @@
 		var orig = Layer.visible;
 		Layer.visible = function (where) {
 			var ret = orig.apply(this, arguments);
-			var scope = where || document.body;
+			var scope = where || getCatalogScanRoot();
 			function runScan() {
 				scanCatalogCardsForKinopoisk(scope);
 			}
@@ -324,12 +345,13 @@
 		var search_year = parseInt((search_date + '').slice(0, 4));
 		var orig = card.original_title || card.original_name;
 		var kp_prox = '';
+		var kpRatingCacheMap = Lampa.Storage.cache('kp_rating', 500, {});
 		var params = {
 			id: card.id,
 			url: kp_prox + 'https://kinopoiskapiunofficial.tech/',
 			rating_url: kp_prox + 'https://rating.kinopoisk.ru/',
 			headers: {
-				'X-API-KEY': decodeSecret([85, 4, 115, 118, 107, 125, 10, 70, 85, 67, 82, 14, 32, 110, 102, 43, 9, 19, 85, 73, 4, 83, 33, 110, 52, 44, 92, 21, 72, 22, 87, 1, 118, 32, 100, 127], atob('X0tQM3Bhc3N3b3Jk'))
+				'X-API-KEY': KP_API_KEY
 			},
 			cache_time: CACHE_TIME_MS
 		};
@@ -378,6 +400,8 @@
 			if (items && items.length) {
 				var is_sure = false;
 				var is_imdb = false;
+				var normOrig = orig ? normalizeTitle(orig) : '';
+				var normCardTitle = card.title ? normalizeTitle(card.title) : '';
 				items.forEach(function (c) {
 					var year = c.start_date || c.year || '0000';
 					c.tmp_year = parseInt((year + '').slice(0, 4));
@@ -394,18 +418,18 @@
 				}
 				var cards = items;
 				if (cards.length) {
-					if (orig) {
+					if (normOrig) {
 						var _tmp = cards.filter(function (elem) {
-							return containsTitle(elem.orig_title || elem.nameOriginal, orig) || containsTitle(elem.en_title || elem.nameEn, orig) || containsTitle(elem.title || elem.ru_title || elem.nameRu, orig);
+							return titleFieldContainsNorm(elem.orig_title || elem.nameOriginal, normOrig) || titleFieldContainsNorm(elem.en_title || elem.nameEn, normOrig) || titleFieldContainsNorm(elem.title || elem.ru_title || elem.nameRu, normOrig);
 						});
 						if (_tmp.length) {
 							cards = _tmp;
 							is_sure = true;
 						}
 					}
-					if (card.title) {
+					if (normCardTitle) {
 						var _tmp2 = cards.filter(function (elem) {
-							return containsTitle(elem.title || elem.ru_title || elem.nameRu, card.title) || containsTitle(elem.en_title || elem.nameEn, card.title) || containsTitle(elem.orig_title || elem.nameOriginal, card.title);
+							return titleFieldContainsNorm(elem.title || elem.ru_title || elem.nameRu, normCardTitle) || titleFieldContainsNorm(elem.en_title || elem.nameEn, normCardTitle) || titleFieldContainsNorm(elem.orig_title || elem.nameOriginal, normCardTitle);
 						});
 						if (_tmp2.length) {
 							cards = _tmp2;
@@ -428,11 +452,11 @@
 					}
 					if (is_sure) {
 						is_sure = false;
-						if (orig) {
-							is_sure |= equalTitle(cards[0].orig_title || cards[0].nameOriginal, orig) || equalTitle(cards[0].en_title || cards[0].nameEn, orig) || equalTitle(cards[0].title || cards[0].ru_title || cards[0].nameRu, orig);
+						if (normOrig) {
+							is_sure |= equalTitleNormalized(normalizeTitle(cards[0].orig_title || cards[0].nameOriginal), normOrig) || equalTitleNormalized(normalizeTitle(cards[0].en_title || cards[0].nameEn), normOrig) || equalTitleNormalized(normalizeTitle(cards[0].title || cards[0].ru_title || cards[0].nameRu), normOrig);
 						}
-						if (card.title) {
-							is_sure |= equalTitle(cards[0].title || cards[0].ru_title || cards[0].nameRu, card.title) || equalTitle(cards[0].en_title || cards[0].nameEn, card.title) || equalTitle(cards[0].orig_title || cards[0].nameOriginal, card.title);
+						if (normCardTitle) {
+							is_sure |= equalTitleNormalized(normalizeTitle(cards[0].title || cards[0].ru_title || cards[0].nameRu), normCardTitle) || equalTitleNormalized(normalizeTitle(cards[0].en_title || cards[0].nameEn), normCardTitle) || equalTitleNormalized(normalizeTitle(cards[0].orig_title || cards[0].nameOriginal), normCardTitle);
 						}
 					}
 				}
@@ -515,12 +539,12 @@
 			return cleanTitle(str.toLowerCase().replace(/[\-\u2010-\u2015\u2E3A\u2E3B\uFE58\uFE63\uFF0D]+/g, '-').replace(/ё/g, 'е'));
 		}
 
-		function equalTitle(t1, t2){
-			return typeof t1 === 'string' && typeof t2 === 'string' && normalizeTitle(t1) === normalizeTitle(t2);
+		function titleFieldContainsNorm(fieldVal, normSearch) {
+			return typeof fieldVal === 'string' && typeof normSearch === 'string' && normSearch.length > 0 && normalizeTitle(fieldVal).indexOf(normSearch) !== -1;
 		}
 
-		function containsTitle(str, title){
-			return typeof str === 'string' && typeof title === 'string' && normalizeTitle(str).indexOf(normalizeTitle(title)) !== -1;
+		function equalTitleNormalized(normField, normSearch) {
+			return typeof normField === 'string' && typeof normSearch === 'string' && normSearch.length > 0 && normField === normSearch;
 		}
 
 		function showError(error) {
@@ -533,50 +557,68 @@
 
 		function _getCache(movie) {
 			var timestamp = new Date().getTime();
-			var cache = Lampa.Storage.cache('kp_rating', 500, {});
-			if (cache[movie]) {
-				if ((timestamp - cache[movie].timestamp) > params.cache_time) {
-					delete cache[movie];
-					Lampa.Storage.set('kp_rating', cache);
+			if (kpRatingCacheMap[movie]) {
+				if ((timestamp - kpRatingCacheMap[movie].timestamp) > params.cache_time) {
+					delete kpRatingCacheMap[movie];
+					Lampa.Storage.set('kp_rating', kpRatingCacheMap);
 					return false;
 				}
 			} else return false;
-			return cache;
+			return kpRatingCacheMap;
 		}
 
 		function _setCache(movie, data) {
 			var timestamp = new Date().getTime();
-			var cache = Lampa.Storage.cache('kp_rating', 500, {});
-			if (!cache[movie]) {
-				cache[movie] = data;
-				Lampa.Storage.set('kp_rating', cache);
+			if (!kpRatingCacheMap[movie]) {
+				kpRatingCacheMap[movie] = data;
+				Lampa.Storage.set('kp_rating', kpRatingCacheMap);
 			} else {
-				if ((timestamp - cache[movie].timestamp) > params.cache_time) {
+				if ((timestamp - kpRatingCacheMap[movie].timestamp) > params.cache_time) {
 					data.timestamp = timestamp;
-					cache[movie] = data;
-					Lampa.Storage.set('kp_rating', cache);
-				} else data = cache[movie];
+					kpRatingCacheMap[movie] = data;
+					Lampa.Storage.set('kp_rating', kpRatingCacheMap);
+				} else data = kpRatingCacheMap[movie];
 			}
 			return data;
 		}
 
 		function _showRating(data) {
 			if (!data) return;
-			var kp_rating = formatRatingDisplay(data.kp);
-			var imdb_rating = formatRatingDisplay(data.imdb);
 
 			if (cardElement) {
-				applyCardVoteKinopoisk(cardElement, kp_rating);
+				applyCardPosterRating(cardElement, data, card);
 				if (cardElement.dataset) delete cardElement.dataset.kpInflightId;
 				return;
 			}
 
 			var render = fullRender || Lampa.Activity.active().activity.render();
 			$('.wait_rating', render).remove();
-			$('.rate--tmdb', render).addClass('hide');
-			$('.rate--imdb', render).removeClass('hide').find('> div').eq(0).text(imdb_rating);
-			$('.rate--kp', render).removeClass('hide').find('> div').eq(0).text(kp_rating);
-			reorderFullPageRatingsKpFirst($(render));
+			var hasKp = hasPositiveRating(data.kp);
+			var hasImdb = hasPositiveRating(data.imdb);
+			var tmdbN = tmdbVoteAverage(card);
+			var hasTmdb = tmdbN > 0;
+
+			var $r = $(render);
+			var $kp = $r.find('.rate--kp');
+			var $imdb = $r.find('.rate--imdb');
+			var $tmdb = $r.find('.rate--tmdb');
+
+			if (hasKp) {
+				$kp.removeClass('hide').find('> div').eq(0).text(formatRatingDisplay(data.kp));
+			} else {
+				$kp.addClass('hide');
+			}
+			if (hasImdb) {
+				$imdb.removeClass('hide').find('> div').eq(0).text(formatRatingDisplay(data.imdb));
+			} else {
+				$imdb.addClass('hide');
+			}
+			if (!hasKp && !hasImdb && hasTmdb) {
+				$tmdb.removeClass('hide').find('> div').eq(0).text(formatRatingDisplay(tmdbN));
+			} else {
+				$tmdb.addClass('hide');
+			}
+			reorderFullPageRatingsKpFirst($r);
 		}
 	}
 
@@ -587,33 +629,31 @@
 		patchScrollAppendMirrorCardData();
 		patchLayerVisibleForCatalog();
 
-		scheduleCatalogCardScan(document.body, 0);
+		scheduleCatalogCardScan(getCatalogScanRoot(), 0);
 		setTimeout(function () {
 			patchLayerVisibleForCatalog();
-			scheduleCatalogCardScan(document.body, 0);
+			scheduleCatalogCardScan(getCatalogScanRoot(), 0);
 		}, 180);
 
 		if (window.Lampa && Lampa.Listener) {
 			Lampa.Listener.follow('app', function (e) {
 				if (e.type === 'ready') {
 					patchLayerVisibleForCatalog();
-					scheduleCatalogCardScan(document.body, 0);
+					scheduleCatalogCardScan(getCatalogScanRoot(), 0);
 				}
 			});
 		}
 
 		new MutationObserver(function (mutations) {
-			if (mutationAddsCards(mutations)) scheduleCatalogCardScan(document.body);
+			if (mutationAddsCards(mutations)) scheduleCatalogCardScan(getCatalogScanRoot());
 		}).observe(document.body, { childList: true, subtree: true });
 
 		Lampa.Listener.follow('full', function (e) {
 			if (e.type == 'build' && e.name == 'start' && e.body) {
-				hideTmdbRow(e.body);
 				reorderFullPageRatingsKpFirst(e.body);
 			}
 			if (e.type == 'complite') {
 				var render = e.object.activity.render();
-				hideTmdbRow(render);
 				if (!hasKpCache(e.data.movie.id) && !$('.wait_rating', render).length) {
 					$('.info__rate', render).after('<div style="width:2em;margin-top:1em;margin-right:1em" class="wait_rating"><div class="broadcast__scan"><div></div></div><div>');
 				}
