@@ -3,6 +3,11 @@
 
 	var CACHE_TIME_MS = 60 * 60 * 24 * 1000;
 
+    var KP_RATING_XML_BASE_URL = 'https://rating.kinopoisk.ru/';
+	var KP_API_BASE_URL = 'https://kinopoiskapiunofficial.tech/';
+	var KP_API_PATH_SEARCH_BY_KEYWORD = 'api/v2.1/films/search-by-keyword';
+	var KP_API_PATH_FILMS_V22 = 'api/v2.2/films';
+
 	function endsWith(str, searchString) {
 		var start = str.length - searchString.length;
 		if (start < 0) return false;
@@ -17,7 +22,7 @@
 			var c = str.charCodeAt(i);
 
 			hash = ((hash << 5) - hash) + c;
-			hash = hash & hash;
+			hash = hash | 0;
 		}
 
 		var result = '';
@@ -348,8 +353,8 @@
 		var kpRatingCacheMap = Lampa.Storage.cache('kp_rating', 500, {});
 		var params = {
 			id: card.id,
-			url: kp_prox + 'https://kinopoiskapiunofficial.tech/',
-			rating_url: kp_prox + 'https://rating.kinopoisk.ru/',
+			url: kp_prox + KP_API_BASE_URL,
+			rating_url: kp_prox + KP_RATING_XML_BASE_URL,
 			headers: {
 				'X-API-KEY': KP_API_KEY
 			},
@@ -368,8 +373,8 @@
 
 		function searchFilm() {
 			var url = params.url;
-			var url_by_title = Lampa.Utils.addUrlComponent(url + 'api/v2.1/films/search-by-keyword', 'keyword=' + encodeURIComponent(clean_title));
-			if (card.imdb_id) url = Lampa.Utils.addUrlComponent(url + 'api/v2.2/films', 'imdbId=' + encodeURIComponent(card.imdb_id));
+			var url_by_title = Lampa.Utils.addUrlComponent(url + KP_API_PATH_SEARCH_BY_KEYWORD, 'keyword=' + encodeURIComponent(clean_title));
+			if (card.imdb_id) url = Lampa.Utils.addUrlComponent(url + KP_API_PATH_FILMS_V22, 'imdbId=' + encodeURIComponent(card.imdb_id));
 			else url = url_by_title;
 			network.clear();
 			network.timeout(15000);
@@ -465,7 +470,7 @@
 					var base_search = function base_search() {
 						network.clear();
 						network.timeout(15000);
-						network.silent(params.url + 'api/v2.2/films/' + id, function (data) {
+						network.silent(params.url + KP_API_PATH_FILMS_V22 + '/' + id, function (data) {
 							var movieRating = _setCache(params.id, {
 								kp: data.ratingKinopoisk,
 								imdb: data.ratingImdb,
@@ -604,19 +609,25 @@
 			var $kp = $r.find('.rate--kp');
 			var $imdb = $r.find('.rate--imdb');
 			var $tmdb = $r.find('.rate--tmdb');
+			var $kpText = $kp.find('> div').eq(0);
+			var $imdbText = $imdb.find('> div').eq(0);
+			var $tmdbText = $tmdb.find('> div').eq(0);
 
 			if (hasKp) {
-				$kp.removeClass('hide').find('> div').eq(0).text(formatRatingDisplay(data.kp));
+				$kp.removeClass('hide');
+				$kpText.text(formatRatingDisplay(data.kp));
 			} else {
 				$kp.addClass('hide');
 			}
 			if (hasImdb) {
-				$imdb.removeClass('hide').find('> div').eq(0).text(formatRatingDisplay(data.imdb));
+				$imdb.removeClass('hide');
+				$imdbText.text(formatRatingDisplay(data.imdb));
 			} else {
 				$imdb.addClass('hide');
 			}
 			if (!hasKp && !hasImdb && hasTmdb) {
-				$tmdb.removeClass('hide').find('> div').eq(0).text(formatRatingDisplay(tmdbN));
+				$tmdb.removeClass('hide');
+				$tmdbText.text(formatRatingDisplay(tmdbN));
 			} else {
 				$tmdb.addClass('hide');
 			}
