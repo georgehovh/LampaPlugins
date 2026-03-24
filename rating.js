@@ -528,7 +528,8 @@
 		}
 
 		function cleanTitle(str){
-			return str.replace(/[\s.,:;’'`!?]+/g, ' ').trim();
+			if (str === undefined || str === null) return '';
+			return String(str).replace(/[\s.,:;’'`!?]+/g, ' ').trim();
 		}
 
 		function kpCleanTitle(str){
@@ -536,7 +537,8 @@
 		}
 
 		function normalizeTitle(str){
-			return cleanTitle(str.toLowerCase().replace(/[\-\u2010-\u2015\u2E3A\u2E3B\uFE58\uFE63\uFF0D]+/g, '-').replace(/ё/g, 'е'));
+			if (str === undefined || str === null) return '';
+			return cleanTitle(String(str).toLowerCase().replace(/[\-\u2010-\u2015\u2E3A\u2E3B\uFE58\uFE63\uFF0D]+/g, '-').replace(/ё/g, 'е'));
 		}
 
 		function titleFieldContainsNorm(fieldVal, normSearch) {
