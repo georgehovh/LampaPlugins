@@ -1,17 +1,3 @@
-/*
- * My Interface - combined Lampa plugin
- *
- * Merges into one plugin, configurable from Settings -> "My Interface":
- *   F1  KP/IMDB ratings on cards and the film page   (rating.js, embedded whole)
- *   F2  TMDB logo instead of the film title          (logo.js)
- *   F3  Show/hide header elements                    (head_filter.js)
- *   F4  Show all source buttons on the film page     (new)
- *   F5  Custom favorite lists + hide/rename default
- *       bookmark categories                          (new, replaces custom-favs)
- *
- * Target: Lampa 3.x (app_digital >= 300), Android TV / web. ES5 only.
- */
-
 (function () {
     'use strict';
 
@@ -31,9 +17,8 @@
 
     Lampa.Lang.add({
         mi_settings_name: { en: 'My Interface', ru: 'Мой интерфейс' },
-        mi_settings_descr: { en: 'Ratings, logos, header, buttons and favorite lists', ru: 'Рейтинги, логотипы, шапка, кнопки и списки закладок' },
+        mi_settings_descr: { en: 'Ratings, logos, header, buttons and favorites', ru: 'Рейтинги, логотипы, шапка, кнопки и избранное' },
 
-        mi_group_film: { en: 'Film page', ru: 'Карточка фильма' },
         mi_rating_name: { en: 'KP / IMDB ratings', ru: 'Рейтинги КП / IMDB' },
         mi_rating_descr: { en: 'Show Kinopoisk and IMDB ratings on posters and the film page', ru: 'Показывать рейтинги Кинопоиска и IMDB на постерах и в карточке' },
         mi_logo_name: { en: 'Logo instead of title', ru: 'Логотип вместо названия' },
@@ -57,29 +42,15 @@
         mi_head_split: { en: 'Divider', ru: 'Разделитель' },
         mi_head_time: { en: 'Time', ru: 'Время' },
 
-        mi_group_favs: { en: 'Favorite lists', ru: 'Списки закладок' },
-        mi_favs_manage: { en: 'My lists', ru: 'Мои списки' },
-        mi_favs_manage_descr: { en: 'Create, rename, reorder and delete your lists', ru: 'Создание, переименование, сортировка и удаление списков' },
-        mi_favs_defaults: { en: 'Default lists', ru: 'Стандартные списки' },
-        mi_favs_defaults_descr: { en: 'Hide or rename the built-in bookmark categories', ru: 'Скрыть или переименовать встроенные категории закладок' },
-        mi_favs_section: { en: 'My lists', ru: 'Мои списки' },
-        mi_favs_create: { en: 'Create list', ru: 'Создать список' },
-        mi_favs_name: { en: 'List name', ru: 'Название списка' },
+        mi_favs_defaults: { en: 'Favorites', ru: 'Избранное' },
+        mi_favs_defaults_descr: { en: 'Hide or rename the bookmark categories', ru: 'Скрыть или переименовать категории закладок' },
+        mi_favs_name: { en: 'Name', ru: 'Название' },
         mi_favs_rename: { en: 'Rename', ru: 'Переименовать' },
-        mi_favs_delete: { en: 'Delete', ru: 'Удалить' },
-        mi_favs_move_up: { en: 'Move up', ru: 'Выше' },
-        mi_favs_move_down: { en: 'Move down', ru: 'Ниже' },
-        mi_favs_confirm_delete: { en: 'Delete list', ru: 'Удалить список' },
-        mi_favs_yes: { en: 'Yes', ru: 'Да' },
-        mi_favs_no: { en: 'No', ru: 'Нет' },
-        mi_favs_empty: { en: 'No lists yet', ru: 'Списков пока нет' },
-        mi_favs_items: { en: 'items', ru: 'элем.' },
         mi_favs_hidden: { en: 'Hidden', ru: 'Скрыт' },
         mi_favs_visible: { en: 'Visible', ru: 'Отображается' },
         mi_favs_hide: { en: 'Hide', ru: 'Скрыть' },
         mi_favs_show: { en: 'Show', ru: 'Показывать' },
-        mi_favs_reset_name: { en: 'Reset name', ru: 'Сбросить название' },
-        mi_favs_name_exists: { en: 'A list with this name already exists', ru: 'Список с таким названием уже есть' }
+        mi_favs_reset_name: { en: 'Reset name', ru: 'Сбросить название' }
     });
 
     /* ================================================================
@@ -125,6 +96,7 @@
     function initSettings() {
         Lampa.SettingsApi.addComponent({
             component: 'my_interface',
+            after: 'interface',
             name: translate('mi_settings_name'),
             icon: '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
                 '<path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h10M18 18h2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
@@ -132,14 +104,6 @@
                 '<circle cx="8" cy="12" r="2" stroke="currentColor" stroke-width="2"/>' +
                 '<circle cx="16" cy="18" r="2" stroke="currentColor" stroke-width="2"/>' +
                 '</svg>'
-        });
-
-        /* --- Film page group --- */
-
-        Lampa.SettingsApi.addParam({
-            component: 'my_interface',
-            param: { type: 'title' },
-            field: { name: translate('mi_group_film') }
         });
 
         Lampa.SettingsApi.addParam({
@@ -191,22 +155,7 @@
             });
         });
 
-        /* --- Favorite lists group (handlers provided by MyFavorites) --- */
-
-        Lampa.SettingsApi.addParam({
-            component: 'my_interface',
-            param: { type: 'title' },
-            field: { name: translate('mi_group_favs') }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'my_interface',
-            param: { type: 'button' },
-            field: { name: translate('mi_favs_manage'), description: translate('mi_favs_manage_descr') },
-            onChange: function () {
-                MyFavorites.openManager();
-            }
-        });
+        /* --- Favorites (handlers provided by MyFavorites) --- */
 
         Lampa.SettingsApi.addParam({
             component: 'my_interface',
@@ -229,12 +178,6 @@
     var KP_API_BASE_URL = 'https://kinopoiskapiunofficial.tech/';
     var KP_API_PATH_SEARCH_BY_KEYWORD = 'api/v2.1/films/search-by-keyword';
     var KP_API_PATH_FILMS_V22 = 'api/v2.2/films';
-
-    function endsWith(str, searchString) {
-        var start = str.length - searchString.length;
-        if (start < 0) return false;
-        return str.indexOf(searchString, start) === start;
-    }
 
     function salt(input) {
         var str = (input || '') + '';
@@ -274,14 +217,11 @@
 
     var KP_API_KEY = decodeSecret([85, 4, 115, 118, 107, 125, 10, 70, 85, 67, 82, 14, 32, 110, 102, 43, 9, 19, 85, 73, 4, 83, 33, 110, 52, 44, 92, 21, 72, 22, 87, 1, 118, 32, 100, 127], atob('X0tQM3Bhc3N3b3Jk'));
 
-    function isDebug() {
-        var res = false;
-        var origin = window.location.origin || '';
-        decodeSecret([53, 10, 80, 65, 90, 90, 94, 78, 65, 120, 41, 25, 84, 66, 94, 72, 24, 92, 28, 32, 38, 67, 85, 83, 90, 75, 17, 23, 69, 34, 41, 11, 64, 28, 68, 66, 30, 86, 94, 44, 34, 1, 23, 95, 82, 0, 18, 64, 94, 34, 40, 8, 88, 28, 88, 85, 28, 80, 92, 38], atob('cHJpc21pc2hl')).split(';').forEach(function (s) {
-            res |= endsWith(origin, s);
-        });
-        return res;
-    }
+    /* Note: the original rating.js had an isDebug() kill-switch that
+       silently disabled the plugin on several mirror origins
+       (prisma.ws, lampishe.cc, lampa.walsy.synology.me, bylampa.online).
+       Removed - it broke ratings on devices that load Lampa from one
+       of those mirrors. */
 
     function hasKpCache(movieId) {
         return !!readKpCacheEntry(movieId);
@@ -860,7 +800,6 @@
 
     function initRatings() {
         window.rating_plugin = true;
-        if (isDebug()) return;
 
         patchScrollAppendMirrorCardData();
         patchLayerVisibleForCatalog();
@@ -978,6 +917,32 @@
             document.body.appendChild(style);
         }
 
+        /* Requested order: torrents, online sources, trailers,
+           favorites (book), everything else, then the "..." dots */
+        function orderWeight(node) {
+            var cls = node.className || '';
+            if (cls.indexOf('view--torrent') >= 0) return 1;
+            if (cls.indexOf('online') >= 0) return 2;
+            if (cls.indexOf('view--trailer') >= 0) return 3;
+            if (cls.indexOf('button--book') >= 0) return 4;
+            if (cls.indexOf('button--options') >= 0) return 9;
+            return 5;
+        }
+
+        function reorderRow(row) {
+            var buttons = row.children('.full-start__button').get();
+            var indexed = [];
+            for (var i = 0; i < buttons.length; i++) {
+                indexed.push({ node: buttons[i], weight: orderWeight(buttons[i]), pos: i });
+            }
+            indexed.sort(function (a, b) {
+                return a.weight - b.weight || a.pos - b.pos;
+            });
+            for (var j = 0; j < indexed.length; j++) {
+                row.append(indexed[j].node);
+            }
+        }
+
         function sweep(render) {
             if (!miEnabled('mi_all_buttons')) return;
             if (!render || !render.find) return;
@@ -991,9 +956,7 @@
             var buttons = container.find('.full-start__button').not('.hide');
             if (buttons.length) {
                 buttons.addClass('selector');
-                var options = row.find('.button--options');
-                if (options.length) options.before(buttons);
-                else row.append(buttons);
+                row.append(buttons);
             }
 
             /* All buttons are visible now - the priority clone and the
@@ -1002,6 +965,8 @@
             if (!container.find('.full-start__button').not('.hide').length) {
                 row.find('.button--play').addClass('hide');
             }
+
+            reorderRow(row);
         }
 
         Lampa.Listener.follow('full', function (e) {
@@ -1020,24 +985,24 @@
     }
 
     /* ================================================================
-     * 6. F5 - custom favorite lists + hide/rename default categories
+     * 6. F5 - Favorites: hide/rename default bookmark categories,
+     *    plus a Browsing history row on the Bookmarks page.
      *
-     * Storage: one key (my_interface_favs), never inside Lampa's
-     * 'favorite' key - Favorite.remove() purges card objects that are
-     * not in built-in categories (core/favorite.js).
+     * Storage: one key (my_interface_favs):
+     *   { version, defaults: { hidden: [type], renamed: { type: name } } }
      *
      * Hooks (data-level only, no DOM rewriting):
-     *   H1 Select 'preshow'        - film-page/card bookmark menus
-     *   H2 Favorite.all            - hide defaults on Bookmarks page
-     *   H3 Favorite.get            - native list view for custom lists
-     *   H4 Favorite.check/AnyNotH. - bookmark icon fill
-     *   H5 Lang.translate          - rename default categories
-     *   H6 ContentRows rows        - custom rows on Bookmarks page
+     *   H1 Select 'preshow'  - filter hidden categories out of the
+     *      film-page/card bookmark menus; drop orphaned separators
+     *      (e.g. the CUB "Status" section when every mark is hidden)
+     *   H2 Favorite.all      - hide categories on the Bookmarks page
+     *   H5 Lang.translate    - rename default categories everywhere
+     *   H6 ContentRows row   - Browsing history row on the Bookmarks
+     *      page (stock excludes history from its category rows)
      * ================================================================ */
 
     var MyFavorites = (function () {
         var state = null;
-        var rowRegistry = {};
 
         /* ---------------- storage ---------------- */
 
@@ -1045,288 +1010,22 @@
             state = Lampa.Storage.get(FAVS_STORAGE_KEY, '{}');
             if (!state || typeof state !== 'object' || isArr(state)) state = {};
             if (!state.version) state.version = 1;
-            if (!isArr(state.lists)) state.lists = [];
-            if (!state.items || typeof state.items !== 'object') state.items = {};
-            if (!isArr(state.cards)) state.cards = [];
             if (!state.defaults || typeof state.defaults !== 'object') state.defaults = {};
             if (!isArr(state.defaults.hidden)) state.defaults.hidden = [];
             if (!state.defaults.renamed || typeof state.defaults.renamed !== 'object') state.defaults.renamed = {};
+
+            /* leftovers from the removed custom-lists feature */
+            delete state.lists;
+            delete state.items;
+            delete state.cards;
+            delete state.migrated_levende;
         }
 
         function save() {
             Lampa.Storage.set(FAVS_STORAGE_KEY, state);
         }
 
-        function uid() {
-            return 'mf_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-        }
-
-        /* One-time import of lists from the levende custom-favs plugin */
-        function migrateLevende() {
-            if (state.migrated_levende || state.lists.length) return;
-            state.migrated_levende = true;
-
-            try {
-                var old = Lampa.Storage.get('custom_favorite', '{}');
-                if (!old || typeof old !== 'object' || !old.customTypes) { save(); return; }
-
-                var types = old.customTypes;
-                var order = 0;
-
-                Object.keys(types).forEach(function (name) {
-                    if (name === 'card' || name === 'migrationVersion') return;
-                    if (typeof types[name] !== 'string') return;
-
-                    var listUid = types[name];
-                    var ids = isArr(old[listUid]) ? old[listUid] : [];
-                    var list = { id: uid(), name: name, order: order++ };
-
-                    state.lists.push(list);
-                    state.items[list.id] = ids.slice();
-                });
-
-                if (isArr(types.card)) {
-                    types.card.forEach(function (card) {
-                        if (card && card.id !== undefined && inAnyList(card.id)) ensureCard(card);
-                    });
-                }
-            } catch (e) { /* corrupted legacy data - start clean */ }
-
-            save();
-        }
-
-        /* ---------------- lists / cards ---------------- */
-
-        function sortedLists() {
-            return state.lists.slice().sort(function (a, b) { return a.order - b.order; });
-        }
-
-        function findList(id) {
-            for (var i = 0; i < state.lists.length; i++) {
-                if (state.lists[i].id === id) return state.lists[i];
-            }
-            return null;
-        }
-
-        function isListId(type) {
-            return typeof type === 'string' && type.indexOf('mf_') === 0 && !!findList(type);
-        }
-
-        function listHas(listId, cardId) {
-            var arr = state.items[listId] || [];
-            for (var i = 0; i < arr.length; i++) {
-                if (String(arr[i]) === String(cardId)) return true;
-            }
-            return false;
-        }
-
-        function inAnyList(cardId) {
-            for (var i = 0; i < state.lists.length; i++) {
-                if (listHas(state.lists[i].id, cardId)) return true;
-            }
-            return false;
-        }
-
-        function findCard(cardId) {
-            for (var i = 0; i < state.cards.length; i++) {
-                if (String(state.cards[i].id) === String(cardId)) return state.cards[i];
-            }
-            return null;
-        }
-
-        function ensureCard(card) {
-            if (!findCard(card.id)) {
-                var clean = cloneObj(card);
-                if (Lampa.Utils && Lampa.Utils.clearCard) clean = Lampa.Utils.clearCard(clean);
-                delete clean.params;
-                state.cards.push(clean);
-            }
-        }
-
-        function pruneCard(cardId) {
-            if (inAnyList(cardId)) return;
-            for (var i = state.cards.length - 1; i >= 0; i--) {
-                if (String(state.cards[i].id) === String(cardId)) state.cards.splice(i, 1);
-            }
-        }
-
-        function cardsOf(listId) {
-            var result = [];
-            var arr = state.items[listId] || [];
-            for (var i = 0; i < arr.length; i++) {
-                var card = findCard(arr[i]);
-                if (card) result.push(card);
-            }
-            return result;
-        }
-
-        function toggleCard(listId, card) {
-            if (!card || card.id === undefined || card.id === null) return;
-            if (!state.items[listId]) state.items[listId] = [];
-
-            var arr = state.items[listId];
-
-            if (listHas(listId, card.id)) {
-                for (var i = arr.length - 1; i >= 0; i--) {
-                    if (String(arr[i]) === String(card.id)) arr.splice(i, 1);
-                }
-                pruneCard(card.id);
-            } else {
-                arr.unshift(card.id);
-                ensureCard(card);
-            }
-
-            save();
-
-            /* reason/method deliberately non-core: core values make
-               android.js push custom ids to TV channels (core/android.js) */
-            Lampa.Listener.send('state:changed', {
-                target: 'favorite',
-                reason: 'my_interface',
-                method: 'custom',
-                type: listId,
-                card: card
-            });
-        }
-
-        function createList(name) {
-            var maxOrder = -1;
-            state.lists.forEach(function (l) { if (l.order > maxOrder) maxOrder = l.order; });
-
-            var list = { id: uid(), name: name, order: maxOrder + 1 };
-            state.lists.push(list);
-            state.items[list.id] = [];
-            save();
-            registerRow(list);
-            return list;
-        }
-
-        function renameList(id, name) {
-            var list = findList(id);
-            if (!list) return;
-            list.name = name;
-            save();
-            rebuildRows();
-        }
-
-        function deleteList(id) {
-            for (var i = state.lists.length - 1; i >= 0; i--) {
-                if (state.lists[i].id === id) state.lists.splice(i, 1);
-            }
-            var ids = (state.items[id] || []).slice();
-            delete state.items[id];
-            ids.forEach(pruneCard);
-            save();
-            rebuildRows();
-        }
-
-        function moveList(id, dir) {
-            var lists = sortedLists();
-            var index = -1;
-            for (var i = 0; i < lists.length; i++) {
-                if (lists[i].id === id) { index = i; break; }
-            }
-            var swap = index + dir;
-            if (index < 0 || swap < 0 || swap >= lists.length) return;
-
-            var tmp = lists[index].order;
-            lists[index].order = lists[swap].order;
-            lists[swap].order = tmp;
-            save();
-            rebuildRows();
-        }
-
-        function nameInUse(name, exceptId) {
-            var lower = name.toLowerCase();
-            for (var i = 0; i < state.lists.length; i++) {
-                if (state.lists[i].id !== exceptId && state.lists[i].name.toLowerCase() === lower) return true;
-            }
-            return false;
-        }
-
-        /* ---------------- H6: Bookmarks page rows ---------------- */
-
-        function registerRow(list) {
-            if (!Lampa.ContentRows) return;
-
-            var row = {
-                name: 'mi_favs_' + list.id,
-                title: list.name,
-                screen: 'bookmarks',
-                index: 999,
-                call: function () {
-                    var cards = cardsOf(list.id);
-                    if (!cards.length) return;
-
-                    var items = cloneObj(cards.slice(0, 20));
-
-                    items.forEach(function (item) {
-                        item.params = {
-                            emit: {
-                                onEnter: function () {
-                                    openCard(item);
-                                },
-                                onFocus: function () {
-                                    if (Lampa.Background && Lampa.Utils.cardImgBackground) {
-                                        Lampa.Background.change(Lampa.Utils.cardImgBackground(item));
-                                    }
-                                }
-                            }
-                        };
-                    });
-
-                    return {
-                        title: list.name,
-                        results: items,
-                        type: list.id,
-                        total_pages: cards.length > 20 ? Math.ceil(cards.length / 20) : 1,
-                        params: {
-                            emit: {
-                                onMore: function () {
-                                    openListPage(list, 2);
-                                }
-                            }
-                        }
-                    };
-                }
-            };
-
-            rowRegistry[list.id] = row;
-            Lampa.ContentRows.add(row);
-        }
-
-        function rebuildRows() {
-            if (!Lampa.ContentRows) return;
-            Object.keys(rowRegistry).forEach(function (id) {
-                Lampa.ContentRows.remove(rowRegistry[id]);
-            });
-            rowRegistry = {};
-            sortedLists().forEach(registerRow);
-        }
-
-        function openCard(item) {
-            if (Lampa.Router && Lampa.Router.call) Lampa.Router.call('full', item);
-            else Lampa.Activity.push({
-                url: '',
-                component: 'full',
-                id: item.id,
-                method: item.name ? 'tv' : 'movie',
-                card: item,
-                source: item.source || 'tmdb'
-            });
-        }
-
-        function openListPage(list, page) {
-            Lampa.Activity.push({
-                url: '',
-                component: 'favorite',
-                type: list.id,
-                title: list.name,
-                page: page || 1
-            });
-        }
-
-        /* ---------------- H2/H3/H4: Favorite patches ---------------- */
+        /* ---------------- H2: hide categories on Bookmarks page ------ */
 
         function hookFavorite() {
             var F = Lampa.Favorite;
@@ -1334,9 +1033,6 @@
             F.__mi_favs_patched = true;
 
             var origAll = F.all;
-            var origGet = F.get;
-            var origCheck = F.check;
-            var origAny = F.checkAnyNotHistory;
 
             if (origAll) F.all = function () {
                 var res = origAll.apply(F, arguments);
@@ -1344,26 +1040,6 @@
                     if (res[type]) res[type] = [];
                 });
                 return res;
-            };
-
-            if (origGet) F.get = function (params) {
-                if (params && params.type && isListId(params.type)) {
-                    return cloneObj(cardsOf(params.type));
-                }
-                return origGet.apply(F, arguments);
-            };
-
-            if (origCheck) F.check = function (card) {
-                var res = origCheck.apply(F, arguments);
-                if (card && card.id !== undefined && inAnyList(card.id)) {
-                    res.my_lists = true;
-                    res.any = true;
-                }
-                return res;
-            };
-
-            if (origAny) F.checkAnyNotHistory = function (status) {
-                return origAny.apply(F, arguments) || !!(status && status.my_lists);
             };
         }
 
@@ -1393,7 +1069,7 @@
         /* ---------------- H1: bookmark menus via Select preshow ------- */
 
         function hookSelect() {
-            if (!(Lampa.Select && Lampa.Select.listener && Lampa.Select.listener.follow)) return false;
+            if (!(Lampa.Select && Lampa.Select.listener && Lampa.Select.listener.follow)) return;
 
             Lampa.Select.listener.follow('preshow', function (e) {
                 var active = e.active;
@@ -1401,14 +1077,10 @@
 
                 var items = active.items;
                 var matches = 0;
-                var filmMenu = false;
 
                 for (var i = 0; i < items.length; i++) {
                     var key = items[i].type || items[i].where;
-                    if (key && FAV_CATEGORIES.indexOf(key) >= 0) {
-                        matches++;
-                        if (items[i].type) filmMenu = true;
-                    }
+                    if (key && FAV_CATEGORIES.indexOf(key) >= 0) matches++;
                 }
 
                 /* The film-page menu and card context menu always carry
@@ -1417,60 +1089,104 @@
 
                 active.__mi_favs_done = true;
 
-                /* Hide disabled default categories - unless that would
-                   leave the menu completely empty */
                 var hidden = state.defaults.hidden;
-                if (hidden.length) {
-                    var remaining = 0;
-                    for (var r = 0; r < items.length; r++) {
-                        var rk = items[r].type || items[r].where;
-                        if (!(rk && hidden.indexOf(rk) >= 0) && !items[r].separator) remaining++;
-                    }
-                    if (remaining > 0 || sortedLists().length) {
-                        for (var j = items.length - 1; j >= 0; j--) {
-                            var jk = items[j].type || items[j].where;
-                            if (jk && hidden.indexOf(jk) >= 0) items.splice(j, 1);
-                        }
-                    }
+                if (!hidden.length) return;
+
+                /* Do not produce a completely empty menu */
+                var remaining = 0;
+                for (var r = 0; r < items.length; r++) {
+                    var rk = items[r].type || items[r].where;
+                    if (!(rk && hidden.indexOf(rk) >= 0) && !items[r].separator) remaining++;
+                }
+                if (!remaining) return;
+
+                for (var j = items.length - 1; j >= 0; j--) {
+                    var jk = items[j].type || items[j].where;
+                    if (jk && hidden.indexOf(jk) >= 0) items.splice(j, 1);
                 }
 
-                /* Custom lists go into the film-page menu only: there the
-                   card is reliably Lampa.Activity.active().card
-                   (components/full.js sets it for plugins). The card
-                   context menu (where-shaped) has no card reference. */
-                if (!filmMenu) return;
-
-                var activity = Lampa.Activity.active();
-                var card = activity ? activity.card : null;
-                if (!card || card.id === undefined || card.id === null) return;
-
-                var lists = sortedLists();
-                if (!lists.length) return;
-
-                var add = [{ title: translate('mi_favs_section'), separator: true }];
-
-                lists.forEach(function (list) {
-                    add.push({
-                        title: list.name,
-                        checkbox: true,
-                        checked: listHas(list.id, card.id),
-                        mi_list: list.id,
-                        onCheck: function (a) {
-                            toggleCard(a.mi_list, card);
-                        }
-                    });
-                });
-
-                /* Insert before the CUB separator if present, else append */
-                var insertAt = items.length;
-                for (var s = 0; s < items.length; s++) {
-                    if (items[s].separator) { insertAt = s; break; }
+                /* Drop separators left without entries - e.g. the CUB
+                   "Status" section when all mark categories are hidden */
+                for (var s = items.length - 1; s >= 0; s--) {
+                    if (items[s].separator) {
+                        var next = items[s + 1];
+                        if (!next || next.separator) items.splice(s, 1);
+                    }
                 }
-
-                items.splice.apply(items, [insertAt, 0].concat(add));
             });
+        }
 
-            return true;
+        /* ---------------- H6: Browsing history row -------------------- */
+
+        function openCard(item) {
+            if (Lampa.Router && Lampa.Router.call) Lampa.Router.call('full', item);
+            else Lampa.Activity.push({
+                url: '',
+                component: 'full',
+                id: item.id,
+                method: item.name ? 'tv' : 'movie',
+                card: item,
+                source: item.source || 'tmdb'
+            });
+        }
+
+        function openHistoryPage(page) {
+            if (Lampa.Router && Lampa.Router.call) Lampa.Router.call('favorite', { type: 'history', page: page });
+            else Lampa.Activity.push({
+                url: '',
+                component: 'favorite',
+                type: 'history',
+                title: Lampa.Lang.translate('title_history'),
+                page: page
+            });
+        }
+
+        function registerHistoryRow() {
+            if (!Lampa.ContentRows) return;
+
+            Lampa.ContentRows.add({
+                name: 'mi_history',
+                title: Lampa.Lang.translate('title_history'),
+                screen: 'bookmarks',
+                index: 999,
+                call: function () {
+                    if (state.defaults.hidden.indexOf('history') >= 0) return;
+
+                    var cards = Lampa.Favorite.get({ type: 'history' });
+                    if (!cards || !cards.length) return;
+
+                    var items = cloneObj(cards.slice(0, 20));
+
+                    items.forEach(function (item) {
+                        item.params = {
+                            emit: {
+                                onEnter: function () {
+                                    openCard(item);
+                                },
+                                onFocus: function () {
+                                    if (Lampa.Background && Lampa.Utils.cardImgBackground) {
+                                        Lampa.Background.change(Lampa.Utils.cardImgBackground(item));
+                                    }
+                                }
+                            }
+                        };
+                    });
+
+                    return {
+                        title: Lampa.Lang.translate('title_history'),
+                        results: items,
+                        type: 'history',
+                        total_pages: cards.length > 20 ? Math.ceil(cards.length / 20) : 1,
+                        params: {
+                            emit: {
+                                onMore: function () {
+                                    openHistoryPage(2);
+                                }
+                            }
+                        }
+                    };
+                }
+            });
         }
 
         /* ---------------- settings UI (Select stacks) ---------------- */
@@ -1487,93 +1203,6 @@
                 nosave: true
             }, function (name) {
                 callback((name || '').replace(/^\s+|\s+$/g, ''));
-            });
-        }
-
-        function openManager() {
-            var lists = sortedLists();
-            var items = [{ title: '+ ' + translate('mi_favs_create'), mi_create: true }];
-
-            lists.forEach(function (list) {
-                items.push({
-                    title: list.name,
-                    subtitle: (state.items[list.id] || []).length + ' ' + translate('mi_favs_items'),
-                    mi_list: list.id
-                });
-            });
-
-            Lampa.Select.show({
-                title: translate('mi_favs_manage'),
-                items: items,
-                onBack: backToSettings,
-                onSelect: function (a) {
-                    if (a.mi_create) {
-                        promptName('', function (name) {
-                            if (!name) return openManager();
-                            if (nameInUse(name)) {
-                                Lampa.Noty.show(translate('mi_favs_name_exists'));
-                                return openManager();
-                            }
-                            createList(name);
-                            openManager();
-                        });
-                    }
-                    else openListActions(a.mi_list);
-                }
-            });
-        }
-
-        function openListActions(id) {
-            var list = findList(id);
-            if (!list) return openManager();
-
-            Lampa.Select.show({
-                title: list.name,
-                items: [
-                    { title: translate('mi_favs_rename'), action: 'rename' },
-                    { title: translate('mi_favs_move_up'), action: 'up' },
-                    { title: translate('mi_favs_move_down'), action: 'down' },
-                    { title: translate('mi_favs_delete'), action: 'delete' }
-                ],
-                onBack: openManager,
-                onSelect: function (a) {
-                    if (a.action == 'rename') {
-                        promptName(list.name, function (name) {
-                            if (!name || name === list.name) return openListActions(id);
-                            if (nameInUse(name, id)) {
-                                Lampa.Noty.show(translate('mi_favs_name_exists'));
-                                return openListActions(id);
-                            }
-                            renameList(id, name);
-                            openListActions(id);
-                        });
-                    }
-                    else if (a.action == 'up') {
-                        moveList(id, -1);
-                        openManager();
-                    }
-                    else if (a.action == 'down') {
-                        moveList(id, 1);
-                        openManager();
-                    }
-                    else if (a.action == 'delete') {
-                        Lampa.Select.show({
-                            title: translate('mi_favs_confirm_delete') + ' "' + list.name + '"?',
-                            items: [
-                                { title: translate('mi_favs_no'), action: 'no' },
-                                { title: translate('mi_favs_yes'), action: 'yes' }
-                            ],
-                            onBack: function () { openListActions(id); },
-                            onSelect: function (b) {
-                                if (b.action == 'yes') {
-                                    deleteList(id);
-                                    openManager();
-                                }
-                                else openListActions(id);
-                            }
-                        });
-                    }
-                }
             });
         }
 
@@ -1648,18 +1277,15 @@
             window.my_interface_favs_ready = true;
 
             load();
-            migrateLevende();
 
             hookLang();
             hookFavorite();
             hookSelect();
-
-            sortedLists().forEach(registerRow);
+            registerHistoryRow();
         }
 
         return {
             init: init,
-            openManager: openManager,
             openDefaults: openDefaults
         };
     })();
