@@ -1116,7 +1116,39 @@
             });
         }
 
-        /* ---------------- H6: Browsing history row -------------------- */
+        /* ---------------- H6: Browsing history row --------------------
+         * History can live in two places depending on the backend:
+         * Favorite.get (local mode, or Account.Bookmarks under CUB sync)
+         * and the raw 'favorite' storage object. Lampac's bookmark.js
+         * plugin overwrites the whole 'favorite' object from its server,
+         * and CUB-sync setups may not carry history at all - so read
+         * both and use whichever actually has films. */
+
+        function localHistoryCards() {
+            var fav = Lampa.Storage.get('favorite', '{}');
+            if (!fav || typeof fav !== 'object') return [];
+
+            var ids = isArr(fav.history) ? fav.history : [];
+            var cards = isArr(fav.card) ? fav.card : [];
+            var result = [];
+
+            for (var i = 0; i < ids.length; i++) {
+                for (var j = 0; j < cards.length; j++) {
+                    if (String(cards[j].id) === String(ids[i])) {
+                        result.push(cards[j]);
+                        break;
+                    }
+                }
+            }
+            return result;
+        }
+
+        function historyCards() {
+            var viaApi = [];
+            try { viaApi = Lampa.Favorite.get({ type: 'history' }) || []; } catch (e) {}
+            var viaLocal = localHistoryCards();
+            return viaApi.length >= viaLocal.length ? viaApi : viaLocal;
+        }
 
         function openCard(item) {
             if (Lampa.Router && Lampa.Router.call) Lampa.Router.call('full', item);
@@ -1150,10 +1182,17 @@
                 screen: 'bookmarks',
                 index: 999,
                 call: function () {
+                    /* never let an error here break the Bookmarks page build */
+                    try { return buildHistoryLine(); }
+                    catch (e) { console.error('My Interface:', 'history row failed -', e && e.message ? e.message : e); }
+                }
+            });
+
+            function buildHistoryLine() {
                     if (state.defaults.hidden.indexOf('history') >= 0) return;
 
-                    var cards = Lampa.Favorite.get({ type: 'history' });
-                    if (!cards || !cards.length) return;
+                    var cards = historyCards();
+                    if (!cards.length) return;
 
                     var items = cloneObj(cards.slice(0, 20));
 
@@ -1185,8 +1224,7 @@
                             }
                         }
                     };
-                }
-            });
+            }
         }
 
         /* ---------------- settings UI (Select stacks) ---------------- */
@@ -1294,10 +1332,25 @@
      * 7. Boot
      * ================================================================ */
 
+    var PLUGIN_VERSION = '1.1.0';
+
+    /* Each feature inits in isolation: one feature failing on an exotic
+       Lampa build/runtime (e.g. Lampac bundles, TV WebViews) must not
+       kill the features after it in the boot chain. Failures are
+       tagged in the console for remote diagnosis. */
+    function safeInit(name, fn) {
+        try { fn(); }
+        catch (e) {
+            console.error('My Interface:', name, 'init failed -', e && e.stack ? e.stack : e);
+        }
+    }
+
     function startPlugin() {
+        console.log('My Interface', PLUGIN_VERSION, 'loaded on', Lampa.Manifest ? 'Lampa ' + Lampa.Manifest.app_version : 'unknown Lampa');
+
         Lampa.Manifest.plugins = {
             type: 'other',
-            version: '1.0.0',
+            version: PLUGIN_VERSION,
             name: translate('mi_settings_name'),
             description: translate('mi_settings_descr'),
             component: 'my_interface'
@@ -1311,12 +1364,12 @@
             Lampa.Storage.set('mi_logo_migrated', 'true');
         }
 
-        initSettings();
-        initHeadFilter();
-        initLogos();
-        initAllButtons();
-        initRatings();
-        MyFavorites.init();
+        safeInit('settings', initSettings);
+        safeInit('head-filter', initHeadFilter);
+        safeInit('logos', initLogos);
+        safeInit('all-buttons', initAllButtons);
+        safeInit('ratings', initRatings);
+        safeInit('favorites', MyFavorites.init);
     }
 
     if (window.appready) startPlugin();
