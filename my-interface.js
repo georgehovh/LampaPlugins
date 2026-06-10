@@ -4,10 +4,6 @@
     if (window.my_interface_plugin) return;
     window.my_interface_plugin = true;
 
-    /* Block the old standalone plugins if they load after this one */
-    window.rating_plugin = true;
-    window.logoplugin = true;
-
     var FAVS_STORAGE_KEY = 'my_interface_favs';
     var FAV_CATEGORIES = ['like', 'wath', 'book', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
 
@@ -124,8 +120,6 @@
             field: { name: translate('mi_allbtn_name'), description: translate('mi_allbtn_descr') }
         });
 
-        /* --- Header sub-screen --- */
-
         Lampa.Template.add('settings_my_interface_head', '<div></div>');
 
         Lampa.SettingsApi.addParam({
@@ -155,8 +149,6 @@
             });
         });
 
-        /* --- Favorites (handlers provided by MyFavorites) --- */
-
         Lampa.SettingsApi.addParam({
             component: 'my_interface',
             param: { type: 'button' },
@@ -168,8 +160,7 @@
     }
 
     /* ================================================================
-     * 2. F1 - KP / IMDB ratings (embedded rating.js)
-     *    Source: exampls/rating.js, gated on the mi_rating trigger.
+     * 2. KP / IMDB ratings (embedded rating.js)
      * ================================================================ */
 
     var CACHE_TIME_MS = 60 * 60 * 24 * 1000;
@@ -217,12 +208,6 @@
 
     var KP_API_KEY = decodeSecret([85, 4, 115, 118, 107, 125, 10, 70, 85, 67, 82, 14, 32, 110, 102, 43, 9, 19, 85, 73, 4, 83, 33, 110, 52, 44, 92, 21, 72, 22, 87, 1, 118, 32, 100, 127], atob('X0tQM3Bhc3N3b3Jk'));
 
-    /* Note: the original rating.js had an isDebug() kill-switch that
-       silently disabled the plugin on several mirror origins
-       (prisma.ws, lampishe.cc, lampa.walsy.synology.me, bylampa.online).
-       Removed - it broke ratings on devices that load Lampa from one
-       of those mirrors. */
-
     function hasKpCache(movieId) {
         return !!readKpCacheEntry(movieId);
     }
@@ -236,6 +221,13 @@
     }
 
     function getCatalogScanRoot() {
+        try {
+            var active = Lampa.Activity.active();
+            if (active && active.activity && active.activity.render) {
+                var root = active.activity.render();
+                if (root && (root.jquery ? root.length : root.querySelectorAll)) return root;
+            }
+        } catch (e) {}
         var lv = document.querySelector('.layer--visible');
         if (lv && lv.querySelectorAll) return lv;
         return document.body;
@@ -255,10 +247,6 @@
         return !isNaN(n) && n > 0;
     }
 
-    /**
-     * Poster / single-badge: Kinopoisk -> IMDb -> TMDB (vote_average).
-     * Returns formatted string or null if none.
-     */
     function pickPosterRating(data, card) {
         if (data && hasPositiveRating(data.kp)) return formatRatingDisplay(data.kp);
         if (data && hasPositiveRating(data.imdb)) return formatRatingDisplay(data.imdb);
@@ -295,10 +283,8 @@
         setCardVoteText(cardEl, display);
     }
 
-    /**
-     * New Lampa stores movie data on the jQuery wrapper (this.html.card_data), not on the DOM node.
-     * Catalog uses Scroll.append -> appendChild, not jQuery.fn.append - patch Scroll.append on each .scroll.
-     */
+    var _schedulePatchScrolls = null;
+
     function patchScrollAppendMirrorCardData() {
         if (window._kpScrollAppendPatched) return;
         window._kpScrollAppendPatched = true;
@@ -313,7 +299,6 @@
             var scr = scrollEl.Scroll;
             var oldAppend = scr.append;
             scr.append = function (object) {
-                // Do not rely on object.jquery - Zepto/minified builds may omit it; jQuery-like has [0] + card_data
                 mirrorCardDataOntoDom(object);
                 return oldAppend.call(this, object);
             };
@@ -352,12 +337,8 @@
         }, 1500);
         setTimeout(patchScrollRootsDeepScanOnce, 4000);
 
-        var mo = new MutationObserver(function () {
-            schedulePatchScrolls();
-        });
-        if (document.body) mo.observe(document.body, { childList: true, subtree: true });
+        _schedulePatchScrolls = schedulePatchScrolls;
 
-        // jQuery paths (if any) still get a mirror
         var $jq = window.jQuery || window.$;
         if ($jq && $jq.fn && !window._kpJqueryAppendPatched) {
             window._kpJqueryAppendPatched = true;
@@ -406,10 +387,6 @@
         return movieDataFromCardDomFallback(cardEl);
     }
 
-    /**
-     * Lampa fires the custom "visible" event only on .layer--visible nodes (see core/layer.js), not on .card.
-     * Catalog cards therefore never received our listener - we drive KP from periodic scans instead.
-     */
     var _kpCardScanTimer = null;
     var CATALOG_SCAN_DEBOUNCE_MS = 72;
     var CATALOG_LAYER_MIRROR_MS = 42;
@@ -481,15 +458,9 @@
             function runScan() {
                 scanCatalogCardsForKinopoisk(scope);
             }
-            if (typeof requestAnimationFrame === 'function') {
-                requestAnimationFrame(function () {
-                    runScan();
-                    setTimeout(runScan, CATALOG_LAYER_MIRROR_MS);
-                });
-            } else {
-                runScan();
-                setTimeout(runScan, CATALOG_LAYER_MIRROR_MS);
-            }
+
+            setTimeout(runScan, 0);
+            setTimeout(runScan, CATALOG_LAYER_MIRROR_MS);
             return ret;
         };
     }
@@ -528,7 +499,13 @@
         function getRating() {
             var movieRating = _getCache(params.id);
             if (movieRating) {
-                return _showRating(movieRating[params.id]);
+                var entry = movieRating[params.id];
+
+                if (fullRender && entry && !hasPositiveRating(entry.kp) && !hasPositiveRating(entry.imdb)) {
+                    delete kpRatingCacheMap[params.id];
+                    return searchFilm();
+                }
+                return _showRating(entry);
             } else {
                 searchFilm();
             }
@@ -630,6 +607,7 @@
                 }
                 if (cards.length == 1 && is_sure) {
                     var id = cards[0].kp_id || cards[0].kinopoisk_id || cards[0].kinopoiskId || cards[0].filmId;
+                    var has_native_requests = typeof AndroidJS !== 'undefined';
                     var base_search = function base_search() {
                         network.clear();
                         network.timeout(15000);
@@ -646,6 +624,9 @@
                             headers: params.headers
                         });
                     };
+
+                    if (!has_native_requests) return base_search();
+
                     network.clear();
                     network.timeout(5000);
                     network["native"](params.rating_url + id + '.xml', function (str) {
@@ -799,12 +780,6 @@
     }
 
     function initRatings() {
-        window.rating_plugin = true;
-
-        /* Remote-diagnosis aid: if this says DISABLED, the mi_rating
-           trigger is off in this device's storage - flip it in
-           Settings -> My Interface. If it says enabled but no ratings
-           appear, filter the console by "kinopoisk" for request errors. */
         console.log('My Interface:', 'ratings ' + (miEnabled('mi_rating') ? 'enabled' : 'DISABLED via the mi_rating setting'));
 
         patchScrollAppendMirrorCardData();
@@ -816,17 +791,11 @@
             scheduleCatalogCardScan(getCatalogScanRoot(), 0);
         }, 180);
 
-        if (window.Lampa && Lampa.Listener) {
-            Lampa.Listener.follow('app', function (e) {
-                if (e.type === 'ready') {
-                    patchLayerVisibleForCatalog();
-                    scheduleCatalogCardScan(getCatalogScanRoot(), 0);
-                }
-            });
-        }
-
         new MutationObserver(function (mutations) {
-            if (mutationAddsCards(mutations)) scheduleCatalogCardScan(getCatalogScanRoot());
+            if (_schedulePatchScrolls) _schedulePatchScrolls();
+            if (miEnabled('mi_rating') && mutationAddsCards(mutations)) {
+                scheduleCatalogCardScan(getCatalogScanRoot());
+            }
         }).observe(document.body, { childList: true, subtree: true });
 
         Lampa.Listener.follow('full', function (e) {
@@ -845,7 +814,7 @@
     }
 
     /* ================================================================
-     * 3. F2 - TMDB logo instead of the title (ported logo.js)
+     * 3. TMDB logo instead of the title (ported logo.js)
      * ================================================================ */
 
     function initLogos() {
@@ -874,7 +843,7 @@
     }
 
     /* ================================================================
-     * 4. F3 - header element filter (ported head_filter.js,
+     * 4. Header element filter (ported head_filter.js,
      *    storage keys head_filter_show_* kept for compatibility)
      * ================================================================ */
 
@@ -902,13 +871,7 @@
     }
 
     /* ================================================================
-     * 5. F4 - show all source buttons on the film page
-     *
-     * Stock Lampa keeps source buttons (torrents, trailer, online
-     * plugins) in a hidden ".buttons--container"; the Play button opens
-     * a Select with them. We move them into the visible row instead.
-     * The stock groupButtons handler then hides Play by itself because
-     * the container is empty (full/start/buttons.js).
+     * 5. Show all source buttons on the film page
      * ================================================================ */
 
     function initAllButtons() {
@@ -923,8 +886,6 @@
             document.body.appendChild(style);
         }
 
-        /* Requested order: torrents, online sources, trailers,
-           favorites (book), everything else, then the "..." dots */
         function orderWeight(node) {
             var cls = node.className || '';
             if (cls.indexOf('view--torrent') >= 0) return 1;
@@ -965,8 +926,6 @@
                 row.append(buttons);
             }
 
-            /* All buttons are visible now - the priority clone and the
-               sources-menu Play button are redundant */
             row.find('.button--priority').remove();
             if (!container.find('.full-start__button').not('.hide').length) {
                 row.find('.button--play').addClass('hide');
@@ -981,8 +940,6 @@
 
             var render = e.object.activity.render();
 
-            /* Sync sweep runs before stock groupButtons; the delayed ones
-               catch buttons that online plugins add asynchronously */
             sweep(render);
             setTimeout(function () { sweep(render); }, 300);
             setTimeout(function () { sweep(render); }, 1200);
@@ -991,26 +948,12 @@
     }
 
     /* ================================================================
-     * 6. F5 - Favorites: hide/rename default bookmark categories,
+     * 6. Favorites: hide/rename default bookmark categories,
      *    plus a Browsing history row on the Bookmarks page.
-     *
-     * Storage: one key (my_interface_favs):
-     *   { version, defaults: { hidden: [type], renamed: { type: name } } }
-     *
-     * Hooks (data-level only, no DOM rewriting):
-     *   H1 Select 'preshow'  - filter hidden categories out of the
-     *      film-page/card bookmark menus; drop orphaned separators
-     *      (e.g. the CUB "Status" section when every mark is hidden)
-     *   H2 Favorite.all      - hide categories on the Bookmarks page
-     *   H5 Lang.translate    - rename default categories everywhere
-     *   H6 ContentRows row   - Browsing history row on the Bookmarks
-     *      page (stock excludes history from its category rows)
      * ================================================================ */
 
     var MyFavorites = (function () {
         var state = null;
-
-        /* ---------------- storage ---------------- */
 
         function load() {
             state = Lampa.Storage.get(FAVS_STORAGE_KEY, '{}');
@@ -1019,19 +962,18 @@
             if (!state.defaults || typeof state.defaults !== 'object') state.defaults = {};
             if (!isArr(state.defaults.hidden)) state.defaults.hidden = [];
             if (!state.defaults.renamed || typeof state.defaults.renamed !== 'object') state.defaults.renamed = {};
-
-            /* leftovers from the removed custom-lists feature */
-            delete state.lists;
-            delete state.items;
-            delete state.cards;
-            delete state.migrated_levende;
+            if (state.lists || state.items || state.cards || state.migrated_levende) {
+                delete state.lists;
+                delete state.items;
+                delete state.cards;
+                delete state.migrated_levende;
+                save();
+            }
         }
 
         function save() {
             Lampa.Storage.set(FAVS_STORAGE_KEY, state);
         }
-
-        /* ---------------- H2: hide categories on Bookmarks page ------ */
 
         function hookFavorite() {
             var F = Lampa.Favorite;
@@ -1048,8 +990,6 @@
                 return res;
             };
         }
-
-        /* ---------------- H5: rename defaults via Lang ---------------- */
 
         function hookLang() {
             if (Lampa.Lang.__mi_favs_patched) return;
@@ -1072,8 +1012,6 @@
             };
         }
 
-        /* ---------------- H1: bookmark menus via Select preshow ------- */
-
         function hookSelect() {
             if (!(Lampa.Select && Lampa.Select.listener && Lampa.Select.listener.follow)) return;
 
@@ -1089,8 +1027,6 @@
                     if (key && FAV_CATEGORIES.indexOf(key) >= 0) matches++;
                 }
 
-                /* The film-page menu and card context menu always carry
-                   at least four category entries */
                 if (matches < 2) return;
 
                 active.__mi_favs_done = true;
@@ -1098,7 +1034,6 @@
                 var hidden = state.defaults.hidden;
                 if (!hidden.length) return;
 
-                /* Do not produce a completely empty menu */
                 var remaining = 0;
                 for (var r = 0; r < items.length; r++) {
                     var rk = items[r].type || items[r].where;
@@ -1111,8 +1046,6 @@
                     if (jk && hidden.indexOf(jk) >= 0) items.splice(j, 1);
                 }
 
-                /* Drop separators left without entries - e.g. the CUB
-                   "Status" section when all mark categories are hidden */
                 for (var s = items.length - 1; s >= 0; s--) {
                     if (items[s].separator) {
                         var next = items[s + 1];
@@ -1121,14 +1054,6 @@
                 }
             });
         }
-
-        /* ---------------- H6: Browsing history row --------------------
-         * History can live in two places depending on the backend:
-         * Favorite.get (local mode, or Account.Bookmarks under CUB sync)
-         * and the raw 'favorite' storage object. Lampac's bookmark.js
-         * plugin overwrites the whole 'favorite' object from its server,
-         * and CUB-sync setups may not carry history at all - so read
-         * both and use whichever actually has films. */
 
         function localHistoryCards() {
             var fav = Lampa.Storage.get('favorite', '{}');
@@ -1188,7 +1113,6 @@
                 screen: 'bookmarks',
                 index: 999,
                 call: function () {
-                    /* never let an error here break the Bookmarks page build */
                     try { return buildHistoryLine(); }
                     catch (e) { console.error('My Interface:', 'history row failed -', e && e.message ? e.message : e); }
                 }
@@ -1233,14 +1157,6 @@
             }
         }
 
-        /* The top register strip on the Bookmarks page (category buttons
-           with film totals) is built from a hardcoded category list in
-           components/bookmarks.js - history is never in it. The whole
-           `lines` array passes through ContentRows.call('bookmarks',...),
-           so wrap it and append a history entry, reusing the module/
-           createInstance wiring of a native entry so it renders and
-           focuses exactly like the stock buttons. */
-
         function hookContentRowsCall() {
             var CR = Lampa.ContentRows;
             if (!CR || CR.__mi_favs_patched) return;
@@ -1261,7 +1177,6 @@
             if (!isArr(lines)) return;
             if (state.defaults.hidden.indexOf('history') >= 0) return;
 
-            /* the register line: entries carry count + createInstance */
             var register = null;
             for (var i = 0; i < lines.length; i++) {
                 var res = lines[i] && lines[i].results;
@@ -1298,13 +1213,13 @@
             });
         }
 
-        /* ---------------- settings UI (Select stacks) ---------------- */
-
         function backToSettings() {
             Lampa.Controller.toggle('settings_component');
         }
 
         function promptName(value, callback) {
+            if (!(Lampa.Input && Lampa.Input.edit)) return callback('');
+
             Lampa.Input.edit({
                 title: translate('mi_favs_name'),
                 value: value || '',
@@ -1379,8 +1294,6 @@
             });
         }
 
-        /* ---------------- init ---------------- */
-
         function init() {
             if (window.my_interface_favs_ready) return;
             window.my_interface_favs_ready = true;
@@ -1404,12 +1317,8 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.2.0';
+    var PLUGIN_VERSION = '1.2.2';
 
-    /* Each feature inits in isolation: one feature failing on an exotic
-       Lampa build/runtime (e.g. Lampac bundles, TV WebViews) must not
-       kill the features after it in the boot chain. Failures are
-       tagged in the console for remote diagnosis. */
     function safeInit(name, fn) {
         try { fn(); }
         catch (e) {
@@ -1428,9 +1337,6 @@
             component: 'my_interface'
         };
 
-        /* Legacy logo.js setting: '1' meant "hide logos". Note: values are
-           written as strings - Lampa.Storage.get swallows an in-memory
-           boolean false via its `value || empty` default fallback */
         if (Lampa.Storage.get('logo_glav') == '1' && Lampa.Storage.get('mi_logo_migrated') !== true) {
             Lampa.Storage.set('mi_logo', 'false');
             Lampa.Storage.set('mi_logo_migrated', 'true');
