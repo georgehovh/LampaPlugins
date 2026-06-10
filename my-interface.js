@@ -801,6 +801,12 @@
     function initRatings() {
         window.rating_plugin = true;
 
+        /* Remote-diagnosis aid: if this says DISABLED, the mi_rating
+           trigger is off in this device's storage - flip it in
+           Settings -> My Interface. If it says enabled but no ratings
+           appear, filter the console by "kinopoisk" for request errors. */
+        console.log('My Interface:', 'ratings ' + (miEnabled('mi_rating') ? 'enabled' : 'DISABLED via the mi_rating setting'));
+
         patchScrollAppendMirrorCardData();
         patchLayerVisibleForCatalog();
 
@@ -1227,6 +1233,71 @@
             }
         }
 
+        /* The top register strip on the Bookmarks page (category buttons
+           with film totals) is built from a hardcoded category list in
+           components/bookmarks.js - history is never in it. The whole
+           `lines` array passes through ContentRows.call('bookmarks',...),
+           so wrap it and append a history entry, reusing the module/
+           createInstance wiring of a native entry so it renders and
+           focuses exactly like the stock buttons. */
+
+        function hookContentRowsCall() {
+            var CR = Lampa.ContentRows;
+            if (!CR || CR.__mi_favs_patched) return;
+            CR.__mi_favs_patched = true;
+
+            var origCall = CR.call;
+
+            CR.call = function (screen, params, calls) {
+                if (screen === 'bookmarks') {
+                    try { injectHistoryRegister(calls); }
+                    catch (e) { console.error('My Interface:', 'history register failed -', e && e.message ? e.message : e); }
+                }
+                return origCall.apply(CR, arguments);
+            };
+        }
+
+        function injectHistoryRegister(lines) {
+            if (!isArr(lines)) return;
+            if (state.defaults.hidden.indexOf('history') >= 0) return;
+
+            /* the register line: entries carry count + createInstance */
+            var register = null;
+            for (var i = 0; i < lines.length; i++) {
+                var res = lines[i] && lines[i].results;
+                if (isArr(res) && res.length && res[0] && res[0].count !== undefined && res[0].params && res[0].params.createInstance) {
+                    register = res;
+                    break;
+                }
+            }
+            if (!register) return;
+
+            for (var j = 0; j < register.length; j++) {
+                if (register[j].mi_history) return;
+            }
+
+            var cards = historyCards();
+            if (!cards.length) return;
+
+            var sample = register[0];
+
+            register.push({
+                mi_history: true,
+                title: Lampa.Lang.translate('title_history'),
+                count: cards.length,
+                limit: sample.limit !== undefined ? sample.limit : 0,
+                params: {
+                    module: sample.params.module,
+                    createInstance: sample.params.createInstance,
+                    emit: {
+                        onEnter: function () {
+                            openHistoryPage(1);
+                        }
+                    }
+                }
+            });
+        }
+
         /* ---------------- settings UI (Select stacks) ---------------- */
 
         function backToSettings() {
@@ -1319,6 +1390,7 @@
             hookLang();
             hookFavorite();
             hookSelect();
+            hookContentRowsCall();
             registerHistoryRow();
         }
 
@@ -1332,7 +1404,7 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.1.0';
+    var PLUGIN_VERSION = '1.2.0';
 
     /* Each feature inits in isolation: one feature failing on an exotic
        Lampa build/runtime (e.g. Lampac bundles, TV WebViews) must not
