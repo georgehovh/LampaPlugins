@@ -1,4 +1,4 @@
-/**
+/*
  * My Interface - combined Lampa plugin
  *
  * Merges into one plugin, configurable from Settings -> "My Interface":
