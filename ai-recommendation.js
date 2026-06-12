@@ -67,9 +67,10 @@
      * 2. Constants and settings access
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.1.0';
+    var PLUGIN_VERSION = '1.2.0';
     var COMPONENT_NAME = 'ai_recs_gemini'; /* 'ai_recommendations' is taken by a stock CUB component */
-    var LIST_COMPONENT_NAME = 'ai_recs_list';
+    var LIST_URL_MARKER = 'ai_recs_list_data';
+    var LIST_PAGE_SIZE = 20;
     var CHAT_KEY = 'ai_rec_chat';
     var LIST_TOTAL = 30;
     var LIST_BATCH = 10;
@@ -282,15 +283,16 @@
             contents.push({ role: 'user', parts: [{ text: t.prompt }] });
             contents.push({ role: 'model', parts: [{ text: compactModelTurn(t) }] });
         }
+        var exclusionReminder = ' Strictly exclude EVERYTHING from the LIKES and ALREADY SEEN lists above and anything already recommended in this conversation.';
         if (newPrompt) {
             contents.push({
                 role: 'user',
-                parts: [{ text: newPrompt + '\n\nRecommend exactly ' + LIST_TOTAL + ' NEW items for this request, following the same rules and JSON format.' }]
+                parts: [{ text: newPrompt + '\n\nRecommend exactly ' + LIST_TOTAL + ' NEW items for this request, following the same rules and JSON format.' + exclusionReminder }]
             });
         } else if (contents.length > 1) {
             contents.push({
                 role: 'user',
-                parts: [{ text: 'Generate a fresh list of exactly ' + LIST_TOTAL + ' recommendations based on my tastes, following the same rules and JSON format.' }]
+                parts: [{ text: 'Generate a fresh list of exactly ' + LIST_TOTAL + ' recommendations based on my tastes, following the same rules and JSON format.' + exclusionReminder }]
             });
         }
         return contents;
@@ -476,18 +478,32 @@
      * 8. The chat input "card" (a custom card class for one line)
      * ================================================================ */
 
+    var SPARKLE_ICON =
+        '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M12 3l1.7 4.6L18 9l-4.3 1.4L12 15l-1.7-4.6L6 9l4.3-1.4L12 3z" fill="currentColor"/>' +
+        '<path d="M19 14l.9 2.4L22 17l-2.1.7L19 20l-.9-2.3L16 17l2.1-.6L19 14z" fill="currentColor"/>' +
+        '<path d="M5 14l.9 2.4L8 17l-2.1.7L5 20l-.9-2.3L2 17l2.1-.6L5 14z" fill="currentColor"/>' +
+        '</svg>';
+
+    var REFRESH_ICON =
+        '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M20 11a8 8 0 1 0-2.34 5.66" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+        '<path d="M20 6v5h-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '</svg>';
+
+    /* one card class for both bottom-line pills: the chat input and
+       the Refresh action (element.ai_refresh distinguishes them) */
     function InputCard(element) {
         var self = this;
+        var refresh = !!element.ai_refresh;
         var el = document.createElement('div');
-        el.className = 'ai-rec-input selector layer--visible layer--render';
+        el.className = 'ai-rec-input selector layer--visible layer--render' +
+            (refresh ? ' ai-rec-input--compact' : '');
         el.innerHTML =
-            '<div class="ai-rec-input__icon">' +
-            '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
-            '<path d="M12 3l1.7 4.6L18 9l-4.3 1.4L12 15l-1.7-4.6L6 9l4.3-1.4L12 3z" fill="currentColor"/>' +
-            '<path d="M19 14l.9 2.4L22 17l-2.1.7L19 20l-.9-2.3L16 17l2.1-.6L19 14z" fill="currentColor"/>' +
-            '<path d="M5 14l.9 2.4L8 17l-2.1.7L5 20l-.9-2.3L2 17l2.1-.6L5 14z" fill="currentColor"/>' +
-            '</svg></div>' +
-            '<div class="ai-rec-input__text">' + escapeHtml(translate('ai_rec_ask')) + '</div>';
+            '<div class="ai-rec-input__icon">' + (refresh ? REFRESH_ICON : SPARKLE_ICON) + '</div>' +
+            '<div class="ai-rec-input__text">' +
+            escapeHtml(translate(refresh ? 'ai_rec_refresh' : 'ai_rec_ask')) +
+            '</div>';
 
         this.create = function () {
             $(el).on('hover:focus', function () {
@@ -518,9 +534,10 @@
         var style = document.createElement('style');
         style.id = 'ai-rec-styles';
         style.textContent =
-            '.ai-rec-input{display:flex;align-items:center;width:36em;max-width:85%;' +
-            'background:rgba(255,255,255,0.08);border-radius:1em;padding:0.9em 1.3em;margin:0.3em 0 1em}' +
+            '.ai-rec-input{display:flex;align-items:center;width:36em;max-width:75%;' +
+            'background:rgba(255,255,255,0.08);border-radius:1em;padding:0.9em 1.3em;margin:0.3em 1.2em 1em 0}' +
             '.ai-rec-input.focus{background:#fff;color:#000}' +
+            '.ai-rec-input--compact{width:auto;max-width:none;flex-shrink:0}' +
             '.ai-rec-input__icon{width:2em;height:2em;margin-right:1em;flex-shrink:0}' +
             '.ai-rec-input__icon svg{width:100%;height:100%}' +
             '.ai-rec-input__text{font-size:1.2em;opacity:0.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
@@ -553,17 +570,62 @@
         return state.queue.length > 0 || state.items.length > state.shown;
     }
 
-    /* standard Lampa behavior: More opens the complete list on its own
-       page; the page is addressed by 'top'/turn-index so it survives
-       restarts (no object refs in the activity) */
+    /* standard Lampa behavior: More opens the complete list as a STOCK
+       category_full page (native grid, native 20-per-page pagination,
+       native scrolling), fed through a wrapped Lampa.Api.list. The page
+       is addressed by 'top'/turn-index so it survives restarts. */
     function openListPage(lineData) {
         var prompt = lineData.ai_state && lineData.ai_state.prompt;
         Lampa.Activity.push({
-            component: LIST_COMPONENT_NAME,
+            url: LIST_URL_MARKER,
+            component: 'category_full',
+            source: 'tmdb',
             title: prompt || translate('ai_rec_top_title'),
             ai_list: lineData.ai_kind === 'top' ? 'top' : lineData.ai_index,
             page: 1
         });
+    }
+
+    function serveListPage(params, oncomplite, onerror) {
+        var chat = loadChat();
+        var state = params.ai_list === 'top' ? chat.top : chat.turns[params.ai_list];
+        if (!state || !isArr(state.items)) return onerror();
+
+        function serve() {
+            if (!state.items.length) return onerror();
+            var page = params.page || 1;
+            var from = (page - 1) * LIST_PAGE_SIZE;
+            var slice = [];
+            for (var i = from; i < state.items.length && i < from + LIST_PAGE_SIZE; i++) {
+                slice.push(cloneCard(state.items[i]));
+            }
+            oncomplite({
+                results: slice,
+                total_pages: Math.ceil(state.items.length / LIST_PAGE_SIZE),
+                page: page
+            });
+        }
+
+        if (!state.queue.length) return serve();
+
+        /* first visit: resolve everything still queued, persist, then serve */
+        resolveFromQueue(state, state.queue.length, knownIds(chat), function (fresh) {
+            for (var i = 0; i < fresh.length; i++) state.items.push(fresh[i]);
+            saveChat(chat);
+            serve();
+        });
+    }
+
+    function patchApiList() {
+        if (window._aiRecApiListPatched) return;
+        window._aiRecApiListPatched = true;
+        var origList = Lampa.Api.list;
+        Lampa.Api.list = function (params, oncomplite, onerror) {
+            if (params && params.url === LIST_URL_MARKER) {
+                return serveListPage(params, oncomplite, onerror);
+            }
+            return origList.apply(Lampa.Api, arguments);
+        };
     }
 
     /* rows fill their cards LAZILY on horizontal scroll - the More card
@@ -592,133 +654,6 @@
         e.scroll.append(more); /* appendChild semantics: also MOVES it back to the end */
     }
 
-    /* ================================================================
-     * 9b. The full list page (grid of every recommendation in a list)
-     * ================================================================ */
-
-    function AiListComponent(object) {
-        var self = this;
-        var html = document.createElement('div');
-        var scroll = null;
-        var body = null;
-        var cards = [];
-        var last = false;
-        var destroyed = false;
-
-        function openCard(cardEl, data) {
-            Lampa.Activity.push({
-                url: '',
-                component: 'full',
-                id: data.id,
-                method: data.name ? 'tv' : 'movie',
-                card: data,
-                source: data.source || 'tmdb'
-            });
-        }
-
-        function buildGrid(items) {
-            if (destroyed) return;
-            quietDeprecated();
-            for (var i = 0; i < items.length; i++) {
-                (function (item) {
-                    if (!item || item.id === undefined || item.id === null) return;
-                    var card = new Lampa.Card(cloneCard(item), { object: object });
-                    card.create();
-                    card.onFocus = function (target) {
-                        last = target;
-                        scroll.update($(target), true);
-                    };
-                    card.onEnter = openCard;
-                    card.visible();
-                    body.appendChild(card.render(true));
-                    cards.push(card);
-                })(items[i]);
-            }
-            scroll.append(body);
-            html.appendChild(scroll.render(true));
-            self.activity.loader(false);
-            self.activity.toggle();
-        }
-
-        this.create = function () {
-            scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
-            body = document.createElement('div');
-            body.className = 'category-full';
-            this.activity.loader(true);
-
-            var chat = loadChat();
-            var state = object.ai_list === 'top' ? chat.top : chat.turns[object.ai_list];
-            if (!state || !isArr(state.items)) return buildGrid([]);
-            if (!state.queue.length) return buildGrid(state.items);
-
-            /* first visit: resolve everything still queued, persist, show all */
-            resolveFromQueue(state, state.queue.length, knownIds(chat), function (fresh) {
-                for (var i = 0; i < fresh.length; i++) state.items.push(fresh[i]);
-                saveChat(chat);
-                buildGrid(state.items);
-            });
-        };
-
-        this.start = function () {
-            if (destroyed) return;
-            Lampa.Controller.add('content', {
-                link: this,
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
-                left: function () {
-                    if (Navigator.canmove('left')) Navigator.move('left');
-                    else Lampa.Controller.toggle('menu');
-                },
-                right: function () {
-                    if (Navigator.canmove('right')) Navigator.move('right');
-                },
-                up: function () {
-                    if (Navigator.canmove('up')) Navigator.move('up');
-                    else Lampa.Controller.toggle('head');
-                },
-                down: function () {
-                    if (Navigator.canmove('down')) Navigator.move('down');
-                },
-                back: function () {
-                    Lampa.Activity.backward();
-                }
-            });
-            Lampa.Controller.toggle('content');
-        };
-
-        this.render = function (js) {
-            return js ? html : $(html);
-        };
-
-        this.pause = function () {};
-        this.stop = function () {};
-
-        this.destroy = function () {
-            destroyed = true;
-            for (var i = 0; i < cards.length; i++) {
-                try { cards[i].destroy(); } catch (e) {}
-            }
-            cards = [];
-            if (scroll) scroll.destroy();
-            $(html).remove();
-        };
-    }
-
-    function appendRefreshButton(e, onRefresh) {
-        var root = e.line && e.line.render ? e.line.render(true) : null;
-        var head = root ? root.querySelector('.items-line__head') : null;
-        if (!head || head._aiRefresh) return;
-        head._aiRefresh = true;
-
-        var btn = document.createElement('div');
-        btn.classList.add('items-line__more');
-        btn.classList.add('selector');
-        btn.innerHTML = escapeHtml(translate('ai_rec_refresh'));
-        $(btn).on('hover:enter', onRefresh);
-        head.appendChild(btn);
-    }
 
     /* ================================================================
      * 10. The page component
@@ -779,20 +714,26 @@
             };
         }
 
+        /* Lampa-style inline chat-bubble icon for the prompt row titles
+           (currentColor, no OS emoji) */
+        var CHAT_TITLE_ICON =
+            '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" ' +
+            'style="width:0.75em;height:0.75em;margin-right:0.4em;vertical-align:-0.04em">' +
+            '<path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8A8.5 8.5 0 0 1 12.5 3a8.38 8.38 0 0 1 8.5 8.5z" ' +
+            'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
         function buildLines() {
             var lines = [];
             if (chat.top && chat.top.items.length) {
-                var topLine = lineFor(chat.top, escapeHtml(translate('ai_rec_top_title')), 'top');
-                topLine.ai_refresh = refreshTop;
-                lines.push(topLine);
+                lines.push(lineFor(chat.top, escapeHtml(translate('ai_rec_top_title')), 'top'));
             }
             for (var i = 0; i < chat.turns.length; i++) {
                 var t = chat.turns[i];
-                if (t.items.length) lines.push(lineFor(t, '&#128172; ' + escapeHtml(t.prompt), 'turn', i));
+                if (t.items.length) lines.push(lineFor(t, CHAT_TITLE_ICON + escapeHtml(t.prompt), 'turn', i));
             }
             lines.push({
                 title: '',
-                results: [{ ai_input: true }],
+                results: [{ ai_input: true }, { ai_refresh: true }],
                 cardClass: function (element, params) { return new InputCard(element, params); },
                 nomore: true,
                 noimage: true,
@@ -804,8 +745,10 @@
 
             if (_focusBottom) {
                 _focusBottom = false;
+                /* land on the NEWEST RESULTS row (not the input below it)
+                   so its posters are fully on screen */
                 setTimeout(function () {
-                    for (var d = 1; d < linesCount; d++) comp.down();
+                    for (var d = 1; d < linesCount - 1; d++) comp.down();
                 }, 100);
             }
         }
@@ -880,8 +823,9 @@
 
         comp.onAppend = function (item, element) {
             if (element.ai_kind === 'input') {
-                item.onSelect = function () {
-                    openPrompt();
+                item.onSelect = function (target, card_data) {
+                    if (card_data && card_data.ai_refresh) refreshTop();
+                    else openPrompt();
                 };
             }
         };
@@ -929,8 +873,7 @@
     }
 
     /* one global 'line' listener serves every AI row: the More poster
-       card (re-anchored to the end on every lazy card append) and the
-       Refresh head button */
+       card, re-anchored to the end on every lazy card append */
     function initLineHooks() {
         Lampa.Listener.follow('line', function (e) {
             if (e.type !== 'visible' && e.type !== 'append') return;
@@ -938,12 +881,6 @@
 
             if (e.data.ai_kind === 'top' || e.data.ai_kind === 'turn') {
                 if (listHasMore(e.data.ai_state)) ensureMoreCard(e);
-                /* the refresh closure travels on the line data - the
-                   active-activity lookup is unreliable during the
-                   synchronous restore build */
-                if (e.data.ai_kind === 'top' && e.data.ai_refresh) {
-                    appendRefreshButton(e, e.data.ai_refresh);
-                }
             }
         });
     }
@@ -1076,8 +1013,8 @@
         safeInit('settings', initSettings);
         safeInit('component', function () {
             Lampa.Component.add(COMPONENT_NAME, AiRecsComponent);
-            Lampa.Component.add(LIST_COMPONENT_NAME, AiListComponent);
         });
+        safeInit('api-list', patchApiList);
         safeInit('line-hooks', initLineHooks);
         safeInit('head-icon', initHeadIcon);
     }
