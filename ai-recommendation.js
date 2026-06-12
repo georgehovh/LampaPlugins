@@ -40,7 +40,6 @@
         ai_rec_clear_descr: { en: 'Delete the saved recommendations and the whole conversation', ru: 'Удалить сохранённые рекомендации и весь диалог' },
         ai_rec_cleared: { en: 'Chat cleared', ru: 'Чат очищен' },
         ai_rec_top_title: { en: 'Recommended for you', ru: 'Рекомендовано для вас' },
-        ai_rec_refresh: { en: 'Refresh', ru: 'Обновить' },
         ai_rec_ask: { en: 'Ask AI for recommendations...', ru: 'Спросить ИИ о рекомендациях...' },
         ai_rec_prompt_title: { en: 'Describe what to recommend', ru: 'Опишите, что порекомендовать' },
         ai_rec_no_key: { en: 'Enter your Gemini API key in Settings - AI Recommendations', ru: 'Укажите API-ключ Gemini в Настройки - ИИ рекомендации' },
@@ -67,7 +66,7 @@
      * 2. Constants and settings access
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.2.0';
+    var PLUGIN_VERSION = '1.2.1';
     var COMPONENT_NAME = 'ai_recs_gemini'; /* 'ai_recommendations' is taken by a stock CUB component */
     var LIST_URL_MARKER = 'ai_recs_list_data';
     var LIST_PAGE_SIZE = 20;
@@ -485,24 +484,26 @@
         '<path d="M5 14l.9 2.4L8 17l-2.1.7L5 20l-.9-2.3L2 17l2.1-.6L5 14z" fill="currentColor"/>' +
         '</svg>';
 
-    var REFRESH_ICON =
+    var TRASH_ICON =
         '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
-        '<path d="M20 11a8 8 0 1 0-2.34 5.66" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
-        '<path d="M20 6v5h-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<path d="M3 6h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+        '<path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<path d="M5 6l1 14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<path d="M10 11v6M14 11v6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
         '</svg>';
 
     /* one card class for both bottom-line pills: the chat input and
-       the Refresh action (element.ai_refresh distinguishes them) */
+       the Clear chat action (element.ai_clear distinguishes them) */
     function InputCard(element) {
         var self = this;
-        var refresh = !!element.ai_refresh;
+        var clear = !!element.ai_clear;
         var el = document.createElement('div');
         el.className = 'ai-rec-input selector layer--visible layer--render' +
-            (refresh ? ' ai-rec-input--compact' : '');
+            (clear ? ' ai-rec-input--compact' : '');
         el.innerHTML =
-            '<div class="ai-rec-input__icon">' + (refresh ? REFRESH_ICON : SPARKLE_ICON) + '</div>' +
+            '<div class="ai-rec-input__icon">' + (clear ? TRASH_ICON : SPARKLE_ICON) + '</div>' +
             '<div class="ai-rec-input__text">' +
-            escapeHtml(translate(refresh ? 'ai_rec_refresh' : 'ai_rec_ask')) +
+            escapeHtml(translate(clear ? 'ai_rec_clear_name' : 'ai_rec_ask')) +
             '</div>';
 
         this.create = function () {
@@ -733,7 +734,7 @@
             }
             lines.push({
                 title: '',
-                results: [{ ai_input: true }, { ai_refresh: true }],
+                results: [{ ai_input: true }, { ai_clear: true }],
                 cardClass: function (element, params) { return new InputCard(element, params); },
                 nomore: true,
                 noimage: true,
@@ -761,24 +762,15 @@
             return a && a.component === COMPONENT_NAME;
         }
 
-        function refreshTop() {
-            if (_generating) return;
-            if (!geminiKey()) return Lampa.Noty.show(translate('ai_rec_no_key'));
-            if (!favCards('like').length) Lampa.Noty.show(translate('ai_rec_no_likes'));
-            comp.activity.loader(true);
-            /* a detached context copy: the old top list is dropped from
-               the conversation (a refresh may re-surface the best picks)
-               without mutating the stored chat object */
-            var ctx = { v: 1, top: null, turns: chat.turns };
-            generateList(ctx, null, function (state) {
-                chat.top = state;
-                saveChat(chat);
-                comp.activity.loader(false);
-                if (pageStillActive()) Lampa.Activity.replace({});
-            }, function (message) {
-                comp.activity.loader(false);
-                Lampa.Noty.show(message);
-            });
+        /* same action as Settings -> AI Recommendations -> Clear chat;
+           the rebuilt page then starts a fresh session (new top list) */
+        function clearChatAndReset() {
+            if (_generating) return; /* an in-flight response would re-save the old chat */
+            clearChat();
+            Lampa.Noty.show(translate('ai_rec_cleared'));
+            chat = loadChat();
+            _focusBottom = false;
+            if (pageStillActive()) Lampa.Activity.replace({});
         }
 
         function submitPrompt(text) {
@@ -824,7 +816,7 @@
         comp.onAppend = function (item, element) {
             if (element.ai_kind === 'input') {
                 item.onSelect = function (target, card_data) {
-                    if (card_data && card_data.ai_refresh) refreshTop();
+                    if (card_data && card_data.ai_clear) clearChatAndReset();
                     else openPrompt();
                 };
             }
