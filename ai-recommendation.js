@@ -33,8 +33,6 @@
         ai_rec_enabled_descr: { en: 'Show the AI button in the header', ru: 'Показывать кнопку ИИ в шапке' },
         ai_rec_gemini_key_name: { en: 'Gemini API key', ru: 'API-ключ Gemini' },
         ai_rec_gemini_key_descr: { en: 'Free key from aistudio.google.com - required', ru: 'Бесплатный ключ с aistudio.google.com - обязателен' },
-        ai_rec_tmdb_key_name: { en: 'TMDB API key', ru: 'API-ключ TMDB' },
-        ai_rec_tmdb_key_descr: { en: 'Optional - when empty, Lampa\'s own TMDB access is used', ru: 'Необязателен - если пусто, используется встроенный доступ Lampa к TMDB' },
         ai_rec_model_name: { en: 'Gemini model', ru: 'Модель Gemini' },
         ai_rec_model_descr: { en: 'Auto tries the best free model and falls back on quota errors', ru: 'Авто использует лучшую бесплатную модель с переходом на запасную при исчерпании квоты' },
         ai_rec_model_auto: { en: 'Auto (best free)', ru: 'Авто (лучшая бесплатная)' },
@@ -69,8 +67,9 @@
      * 2. Constants and settings access
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.0.0';
+    var PLUGIN_VERSION = '1.1.0';
     var COMPONENT_NAME = 'ai_recs_gemini'; /* 'ai_recommendations' is taken by a stock CUB component */
+    var LIST_COMPONENT_NAME = 'ai_recs_list';
     var CHAT_KEY = 'ai_rec_chat';
     var LIST_TOTAL = 30;
     var LIST_BATCH = 10;
@@ -87,10 +86,6 @@
 
     function geminiKey() {
         return (Lampa.Storage.get('ai_rec_gemini_key', '') + '').replace(/^\s+|\s+$/g, '');
-    }
-
-    function tmdbKey() {
-        return (Lampa.Storage.get('ai_rec_tmdb_key', '') + '').replace(/^\s+|\s+$/g, '');
     }
 
     function modelSetting() {
@@ -305,25 +300,10 @@
      * 6. TMDB resolver
      * ================================================================ */
 
+    /* always Lampa's own pipeline - honors the user's TMDB proxy */
     function tmdbRequest(path, ok, fail) {
-        var key = tmdbKey();
-        if (!key) {
-            /* Lampa's own pipeline - honors the user's TMDB proxy */
-            var url = Lampa.TMDB.api(path + (path.indexOf('?') === -1 ? '?' : '&') + 'api_key=' + Lampa.TMDB.key());
-            xhrJson({ url: url, timeout: 15000 }, ok, fail);
-        } else if (key.indexOf('eyJ') === 0) {
-            /* v4 read token */
-            xhrJson({
-                url: 'https://api.themoviedb.org/3/' + path,
-                headers: { 'Authorization': 'Bearer ' + key },
-                timeout: 15000
-            }, ok, fail);
-        } else {
-            xhrJson({
-                url: 'https://api.themoviedb.org/3/' + path + (path.indexOf('?') === -1 ? '?' : '&') + 'api_key=' + encodeURIComponent(key),
-                timeout: 15000
-            }, ok, fail);
-        }
+        var url = Lampa.TMDB.api(path + (path.indexOf('?') === -1 ? '?' : '&') + 'api_key=' + Lampa.TMDB.key());
+        xhrJson({ url: url, timeout: 15000 }, ok, fail);
     }
 
     function itemYear(item) {
@@ -548,10 +528,12 @@
     }
 
     /* ================================================================
-     * 9. More poster card and Refresh button on rows
+     * 9. More poster card (opens the full list page) and the Refresh
+     *    button on the top row
      * ================================================================ */
 
-    function sizeMoreLike(more, lineItems) {
+    function trySizeMoreCard(more, lineItems) {
+        if (more.classList.contains('card-more--fixed-size')) return;
         try {
             var firstCard = lineItems && lineItems[0] ? lineItems[0].render(true) : null;
             var view = firstCard ? firstCard.querySelector('.card__view') : null;
@@ -565,63 +547,163 @@
         } catch (e) {}
     }
 
-    function listExhausted(state) {
-        return !state.queue.length && state.shown >= state.items.length;
+    /* the row shows only the first batch - More exists whenever the
+       full list holds (or can resolve) anything beyond it */
+    function listHasMore(state) {
+        return state.queue.length > 0 || state.items.length > state.shown;
     }
 
-    /* appends the next batch into the same line in place */
-    function loadMore(e, moreEl) {
-        var state = e.data.ai_state;
-        if (!state || e.data.ai_more_busy) return; /* busy flag on the line element, NOT the persisted state */
-        e.data.ai_more_busy = true;
+    /* standard Lampa behavior: More opens the complete list on its own
+       page; the page is addressed by 'top'/turn-index so it survives
+       restarts (no object refs in the activity) */
+    function openListPage(lineData) {
+        var prompt = lineData.ai_state && lineData.ai_state.prompt;
+        Lampa.Activity.push({
+            component: LIST_COMPONENT_NAME,
+            title: prompt || translate('ai_rec_top_title'),
+            ai_list: lineData.ai_kind === 'top' ? 'top' : lineData.ai_index,
+            page: 1
+        });
+    }
 
-        var spare = state.items.slice(state.shown, state.shown + LIST_BATCH);
-        var needFresh = LIST_BATCH - spare.length;
-        var chat = e.data.ai_chat;
-        var title = moreEl.querySelector('.card-more__title');
-        if (title) title.innerHTML = '...';
+    /* rows fill their cards LAZILY on horizontal scroll - the More card
+       is re-anchored to the scroll end on every 'append' event, else
+       late cards land after it (More mid-row) */
+    function ensureMoreCard(e) {
+        if (!e.body || !e.scroll || !e.scroll.append) return;
+        var bodyEl = e.body.jquery ? e.body[0] : e.body;
 
-        resolveFromQueue(state, needFresh, knownIds(chat), function (fresh) {
-            var add = spare.concat(fresh);
-            for (var i = 0; i < fresh.length; i++) state.items.push(fresh[i]);
-            state.shown += add.length;
-            saveChat(chat);
+        var more = bodyEl._aiMoreEl;
+        if (!more) {
+            more = Lampa.Template.js('more');
+            if (!more) return;
+            bodyEl._aiMoreEl = more;
+            more.classList.add('selector');
 
-            for (var j = 0; j < add.length; j++) {
-                var clone = cloneCard(add[j]);
-                e.data.results.push(clone);
-                try { e.line.append(clone); } catch (err) {}
+            $(more).on('hover:focus', function () {
+                try { e.scroll.update($(more), true); } catch (err) {}
+            });
+            $(more).on('hover:enter', function () {
+                openListPage(e.data);
+            });
+        }
+
+        trySizeMoreCard(more, e.items);
+        e.scroll.append(more); /* appendChild semantics: also MOVES it back to the end */
+    }
+
+    /* ================================================================
+     * 9b. The full list page (grid of every recommendation in a list)
+     * ================================================================ */
+
+    function AiListComponent(object) {
+        var self = this;
+        var html = document.createElement('div');
+        var scroll = null;
+        var body = null;
+        var cards = [];
+        var last = false;
+        var destroyed = false;
+
+        function openCard(cardEl, data) {
+            Lampa.Activity.push({
+                url: '',
+                component: 'full',
+                id: data.id,
+                method: data.name ? 'tv' : 'movie',
+                card: data,
+                source: data.source || 'tmdb'
+            });
+        }
+
+        function buildGrid(items) {
+            if (destroyed) return;
+            quietDeprecated();
+            for (var i = 0; i < items.length; i++) {
+                (function (item) {
+                    if (!item || item.id === undefined || item.id === null) return;
+                    var card = new Lampa.Card(cloneCard(item), { object: object });
+                    card.create();
+                    card.onFocus = function (target) {
+                        last = target;
+                        scroll.update($(target), true);
+                    };
+                    card.onEnter = openCard;
+                    card.visible();
+                    body.appendChild(card.render(true));
+                    cards.push(card);
+                })(items[i]);
             }
+            scroll.append(body);
+            html.appendChild(scroll.render(true));
+            self.activity.loader(false);
+            self.activity.toggle();
+        }
 
-            e.data.ai_more_busy = false;
-            if (title) title.innerHTML = Lampa.Lang.translate('more');
+        this.create = function () {
+            scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+            body = document.createElement('div');
+            body.className = 'category-full';
+            this.activity.loader(true);
 
-            if (listExhausted(state)) $(moreEl).remove();
-            else e.scroll.append(moreEl); /* keep More at the end */
+            var chat = loadChat();
+            var state = object.ai_list === 'top' ? chat.top : chat.turns[object.ai_list];
+            if (!state || !isArr(state.items)) return buildGrid([]);
+            if (!state.queue.length) return buildGrid(state.items);
 
-            try { Lampa.Layer.visible(e.scroll.render(true)); } catch (err) {}
-        });
-    }
+            /* first visit: resolve everything still queued, persist, show all */
+            resolveFromQueue(state, state.queue.length, knownIds(chat), function (fresh) {
+                for (var i = 0; i < fresh.length; i++) state.items.push(fresh[i]);
+                saveChat(chat);
+                buildGrid(state.items);
+            });
+        };
 
-    function appendMoreCard(e) {
-        var bodyEl = e.body && e.body.jquery ? e.body[0] : e.body;
-        if (!bodyEl || bodyEl._aiMoreAdded) return;
-        bodyEl._aiMoreAdded = true;
+        this.start = function () {
+            if (destroyed) return;
+            Lampa.Controller.add('content', {
+                link: this,
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () {
+                    if (Navigator.canmove('left')) Navigator.move('left');
+                    else Lampa.Controller.toggle('menu');
+                },
+                right: function () {
+                    if (Navigator.canmove('right')) Navigator.move('right');
+                },
+                up: function () {
+                    if (Navigator.canmove('up')) Navigator.move('up');
+                    else Lampa.Controller.toggle('head');
+                },
+                down: function () {
+                    if (Navigator.canmove('down')) Navigator.move('down');
+                },
+                back: function () {
+                    Lampa.Activity.backward();
+                }
+            });
+            Lampa.Controller.toggle('content');
+        };
 
-        var more = Lampa.Template.js('more');
-        if (!more) return;
-        more.classList.add('selector');
+        this.render = function (js) {
+            return js ? html : $(html);
+        };
 
-        sizeMoreLike(more, e.items);
+        this.pause = function () {};
+        this.stop = function () {};
 
-        $(more).on('hover:focus', function () {
-            try { e.scroll.update($(more), true); } catch (err) {}
-        });
-        $(more).on('hover:enter', function () {
-            loadMore(e, more);
-        });
-
-        e.scroll.append(more);
+        this.destroy = function () {
+            destroyed = true;
+            for (var i = 0; i < cards.length; i++) {
+                try { cards[i].destroy(); } catch (e) {}
+            }
+            cards = [];
+            if (scroll) scroll.destroy();
+            $(html).remove();
+        };
     }
 
     function appendRefreshButton(e, onRefresh) {
@@ -679,8 +761,9 @@
         var comp = new Lampa.InteractionMain(object);
         var chat = null;
         var linesCount = 0;
+        var builtStamp; /* chat.updated at build time - resume staleness check */
 
-        function lineFor(state, title, kind) {
+        function lineFor(state, title, kind, index) {
             var results = [];
             for (var i = 0; i < state.items.length && i < state.shown; i++) {
                 results.push(cloneCard(state.items[i]));
@@ -690,6 +773,7 @@
                 results: results,
                 nomore: true,
                 ai_kind: kind,
+                ai_index: index,
                 ai_state: state,
                 ai_chat: chat
             };
@@ -704,7 +788,7 @@
             }
             for (var i = 0; i < chat.turns.length; i++) {
                 var t = chat.turns[i];
-                if (t.items.length) lines.push(lineFor(t, '&#128172; ' + escapeHtml(t.prompt), 'turn'));
+                if (t.items.length) lines.push(lineFor(t, '&#128172; ' + escapeHtml(t.prompt), 'turn', i));
             }
             lines.push({
                 title: '',
@@ -715,6 +799,7 @@
                 ai_kind: 'input'
             });
             linesCount = lines.length;
+            builtStamp = chat.updated;
             comp.build(lines);
 
             if (_focusBottom) {
@@ -801,6 +886,20 @@
             }
         };
 
+        /* a chat response that arrived while another page was on screen
+           was saved but not rendered - rebuild when this page resumes */
+        var origStart = comp.start;
+        comp.start = function () {
+            if (builtStamp !== undefined && !_generating) {
+                var current = loadChat();
+                if (current.updated !== undefined && current.updated !== builtStamp) {
+                    chat = current;
+                    return Lampa.Activity.replace({});
+                }
+            }
+            return origStart.apply(comp, arguments);
+        };
+
         comp.create = function () {
             this.activity.loader(true);
             chat = loadChat();
@@ -830,15 +929,15 @@
     }
 
     /* one global 'line' listener serves every AI row: the More poster
-       card and the Refresh head button are injected when a row of this
-       page reports visible (the deprecated line sends the same events) */
+       card (re-anchored to the end on every lazy card append) and the
+       Refresh head button */
     function initLineHooks() {
         Lampa.Listener.follow('line', function (e) {
-            if (e.type !== 'visible') return;
+            if (e.type !== 'visible' && e.type !== 'append') return;
             if (!e.data || !e.data.ai_kind) return;
 
             if (e.data.ai_kind === 'top' || e.data.ai_kind === 'turn') {
-                if (!listExhausted(e.data.ai_state)) appendMoreCard(e);
+                if (listHasMore(e.data.ai_state)) ensureMoreCard(e);
                 /* the refresh closure travels on the line data - the
                    active-activity lookup is unreliable during the
                    synchronous restore build */
@@ -925,12 +1024,6 @@
 
         Lampa.SettingsApi.addParam({
             component: 'ai_recs',
-            param: { name: 'ai_rec_tmdb_key', type: 'input', values: '', placeholder: '-', default: '' },
-            field: { name: translate('ai_rec_tmdb_key_name'), description: translate('ai_rec_tmdb_key_descr') }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'ai_recs',
             param: {
                 name: 'ai_rec_model',
                 type: 'select',
@@ -983,6 +1076,7 @@
         safeInit('settings', initSettings);
         safeInit('component', function () {
             Lampa.Component.add(COMPONENT_NAME, AiRecsComponent);
+            Lampa.Component.add(LIST_COMPONENT_NAME, AiListComponent);
         });
         safeInit('line-hooks', initLineHooks);
         safeInit('head-icon', initHeadIcon);

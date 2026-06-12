@@ -22,7 +22,7 @@
         mi_allbtn_name: { en: 'Show all buttons', ru: 'Показывать все кнопки' },
         mi_allbtn_descr: { en: 'Show every source button on the film page instead of the sources menu', ru: 'Показывать все кнопки источников в карточке вместо меню источников' },
         mi_franchise_name: { en: 'Franchise instead of Similar', ru: 'Франшиза вместо похожих' },
-        mi_franchise_descr: { en: 'When a film belongs to a franchise, show its parts instead of the Similar row', ru: 'Если фильм входит во франшизу, показывать её части вместо строки похожих' },
+        mi_franchise_descr: { en: 'When a film belongs to a franchise, show its parts (oldest first) instead of the Similar row', ru: 'Если фильм входит во франшизу, показывать её части (старые первыми) вместо строки похожих' },
         mi_franchise_title: { en: 'Franchise', ru: 'Франшиза' },
         mi_air_status_name: { en: 'Series status on poster', ru: 'Статус сериала на постере' },
         mi_air_status_descr: { en: 'Replace the TV badge with the airing status everywhere (film page and cards)', ru: 'Заменять значок TV статусом выхода сериала везде (страница фильма и карточки)' },
@@ -1080,7 +1080,213 @@
      * the franchise. Films without a franchise keep Similar as is.
      * (Recommendations stay stock: the KP similars endpoint returns no
      * TMDB ids, so its items could not open film pages reliably.)
+     *
+     * The parts are sorted by release year (oldest first, undated/
+     * upcoming last) and the row is capped at 10; a More card at the
+     * end of the row opens a full grid page with every part (the tmdb
+     * source itself caps collection rows at parts.slice(0,19), so the
+     * grid refetches collection/{id} to get the complete list).
      * ================================================================ */
+
+    var FRANCHISE_ROW_LIMIT = 10;
+
+    function franchiseYear(part) {
+        var date = (part && (part.release_date || part.first_air_date)) || '';
+        var y = parseInt((date + '').slice(0, 4), 10);
+        return isNaN(y) || y === 0 ? 9999 : y;
+    }
+
+    /* decorate-sort-undecorate: Array.sort is not stable in old WebViews */
+    function sortFranchiseParts(parts) {
+        var decorated = [];
+        for (var i = 0; i < parts.length; i++) decorated.push({ p: parts[i], y: franchiseYear(parts[i]), i: i });
+        decorated.sort(function (a, b) { return a.y - b.y || a.i - b.i; });
+        var out = [];
+        for (var j = 0; j < decorated.length; j++) out.push(decorated[j].p);
+        return out;
+    }
+
+    /* silence the harmless one-line-per-instance deprecation warnings
+       from the classic Card/InteractionLine components we reuse */
+    function quietDeprecated() {
+        if (window._miWarnFiltered) return;
+        window._miWarnFiltered = true;
+        var origWarn = console.warn;
+        console.warn = function (msg) {
+            if (typeof msg === 'string' && msg.indexOf('deprecated') !== -1 &&
+                /Card|InteractionLine|InteractionMain/.test(msg)) return;
+            return origWarn.apply(console, arguments);
+        };
+    }
+
+    function openFranchisePage(collection) {
+        Lampa.Activity.push({
+            component: 'mi_franchise_list',
+            title: collection.name || translate('mi_franchise_title'),
+            collection_id: collection.id,
+            /* fallback when the collection refetch fails (already sorted) */
+            parts: collection.mi_all || collection.results || [],
+            page: 1
+        });
+    }
+
+    /* full grid page with every franchise part, oldest first */
+    function FranchiseListComponent(object) {
+        var self = this;
+        var html = document.createElement('div');
+        var scroll = null;
+        var body = null;
+        var cards = [];
+        var last = false;
+        var destroyed = false;
+
+        function openCard(cardEl, data) {
+            Lampa.Activity.push({
+                url: '',
+                component: 'full',
+                id: data.id,
+                method: data.name ? 'tv' : 'movie',
+                card: data,
+                source: data.source || 'tmdb'
+            });
+        }
+
+        function buildGrid(items) {
+            if (destroyed) return;
+            quietDeprecated();
+            for (var i = 0; i < items.length; i++) {
+                (function (item) {
+                    if (!item || item.id === undefined || item.id === null) return;
+                    item.source = item.source || 'tmdb';
+                    var card = new Lampa.Card(item, { object: object });
+                    card.create();
+                    card.onFocus = function (target) {
+                        last = target;
+                        scroll.update($(target), true);
+                    };
+                    card.onEnter = openCard;
+                    card.visible();
+                    body.appendChild(card.render(true));
+                    cards.push(card);
+                })(items[i]);
+            }
+            scroll.append(body);
+            html.appendChild(scroll.render(true));
+            self.activity.loader(false);
+            self.activity.toggle();
+        }
+
+        this.create = function () {
+            scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+            body = document.createElement('div');
+            body.className = 'category-full';
+            this.activity.loader(true);
+
+            var fallback = isArr(object.parts) ? object.parts : [];
+            if (!object.collection_id) return buildGrid(fallback);
+
+            var lang = Lampa.Storage.get('language');
+            var url = Lampa.TMDB.api('collection/' + object.collection_id +
+                '?api_key=' + Lampa.TMDB.key() + '&language=' + lang);
+            $.get(url, function (resp) {
+                var parts = resp && isArr(resp.parts) ? resp.parts : null;
+                buildGrid(parts && parts.length ? sortFranchiseParts(parts) : fallback);
+            }).fail(function () {
+                buildGrid(fallback);
+            });
+        };
+
+        this.start = function () {
+            if (destroyed) return;
+            Lampa.Controller.add('content', {
+                link: this,
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () {
+                    if (Navigator.canmove('left')) Navigator.move('left');
+                    else Lampa.Controller.toggle('menu');
+                },
+                right: function () {
+                    if (Navigator.canmove('right')) Navigator.move('right');
+                },
+                up: function () {
+                    if (Navigator.canmove('up')) Navigator.move('up');
+                    else Lampa.Controller.toggle('head');
+                },
+                down: function () {
+                    if (Navigator.canmove('down')) Navigator.move('down');
+                },
+                back: function () {
+                    Lampa.Activity.backward();
+                }
+            });
+            Lampa.Controller.toggle('content');
+        };
+
+        this.render = function (js) {
+            return js ? html : $(html);
+        };
+
+        this.pause = function () {};
+        this.stop = function () {};
+
+        this.destroy = function () {
+            destroyed = true;
+            for (var i = 0; i < cards.length; i++) {
+                try { cards[i].destroy(); } catch (e) {}
+            }
+            cards = [];
+            if (scroll) scroll.destroy();
+            $(html).remove();
+        };
+    }
+
+    /* poster-shaped More card kept at the END of the (componentized)
+       franchise row, which is composed without its native More module.
+       Lines render their cards LAZILY on horizontal scroll, so the card
+       is re-appended to the scroll end on every 'append' event - else
+       late cards land after it (More mid-row). */
+    function trySizeMoreCard(more, items) {
+        if (more.classList.contains('card-more--fixed-size')) return;
+        try {
+            var firstCard = items && items[0] ? items[0].render(true) : null;
+            var view = firstCard ? firstCard.querySelector('.card__view') : null;
+            var rect = view ? view.getBoundingClientRect() : null;
+            if (rect && rect.height > 10) {
+                more.style.width = (rect.width > rect.height ? rect.height : rect.width) + 'px';
+                var box = more.querySelector('.card-more__box');
+                if (box) box.style.height = rect.height + 'px';
+                more.classList.add('card-more--fixed-size');
+            }
+        } catch (err) {}
+    }
+
+    function ensureFranchiseMoreCard(e) {
+        if (!e.body || !e.scroll || !e.scroll.append) return;
+        var bodyEl = e.body.jquery ? e.body[0] : e.body;
+
+        var more = bodyEl._miFranchiseMoreEl;
+        if (!more) {
+            more = Lampa.Template.js ? Lampa.Template.js('more') : null;
+            if (!more) return;
+            bodyEl._miFranchiseMoreEl = more;
+            more.classList.add('selector');
+            var title = more.querySelector('.card-more__title');
+            if (title) title.innerHTML = Lampa.Lang.translate('more');
+
+            $(more).on('hover:focus', function () {
+                try { e.scroll.update($(more), true); } catch (err) {}
+            });
+            $(more).on('hover:enter', function () {
+                openFranchisePage(e.data);
+            });
+        }
+
+        trySizeMoreCard(more, e.items);
+        e.scroll.append(more); /* appendChild semantics: also MOVES it back to the end */
+    }
 
     function initFranchise() {
         Lampa.Listener.follow('full', function (e) {
@@ -1096,7 +1302,26 @@
                 if (d.collection.results[i] && String(d.collection.results[i].id) !== String(d.movie.id)) others++;
             }
             if (others > 0) delete d.simular;
+
+            /* oldest first; cap the row and remember the rest for More */
+            var sorted = sortFranchiseParts(d.collection.results);
+            d.collection.mi_all = sorted;
+            d.collection.results = sorted.slice(0, FRANCHISE_ROW_LIMIT);
+            d.collection.mi_franchise_row = sorted.length > FRANCHISE_ROW_LIMIT;
         });
+
+        /* the film-page card rows are composed WITHOUT their More module
+           (Cards() strips it), so the More card is injected by hand -
+           on 'visible' AND on every card 'append' (rows fill lazily;
+           each append re-anchors the More card to the row end) */
+        Lampa.Listener.follow('line', function (e) {
+            if (e.type !== 'visible' && e.type !== 'append') return;
+            if (!miEnabled('mi_franchise')) return;
+            if (!e.data || !e.data.mi_franchise_row) return;
+            ensureFranchiseMoreCard(e);
+        });
+
+        Lampa.Component.add('mi_franchise_list', FranchiseListComponent);
 
         /* full.js titles the collection row with title_collection -
            rename it to Franchise while the feature is on */
@@ -1764,7 +1989,7 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.5.0';
+    var PLUGIN_VERSION = '1.6.1';
 
     function safeInit(name, fn) {
         try { fn(); }
