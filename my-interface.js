@@ -25,7 +25,7 @@
         mi_franchise_descr: { en: 'When a film belongs to a franchise, show its parts instead of the Similar row', ru: 'Если фильм входит во франшизу, показывать её части вместо строки похожих' },
         mi_franchise_title: { en: 'Franchise', ru: 'Франшиза' },
         mi_air_status_name: { en: 'Series status on poster', ru: 'Статус сериала на постере' },
-        mi_air_status_descr: { en: 'Replace the TV badge on the film page poster with the airing status', ru: 'Заменять значок TV на постере статусом выхода сериала' },
+        mi_air_status_descr: { en: 'Replace the TV badge with the airing status everywhere (film page and cards)', ru: 'Заменять значок TV статусом выхода сериала везде (страница фильма и карточки)' },
         mi_status_returning: { en: 'Returning', ru: 'Онгоинг' },
         mi_status_ended: { en: 'Ended', ru: 'Завершён' },
         mi_status_canceled: { en: 'Canceled', ru: 'Отменён' },
@@ -510,16 +510,23 @@
         return true;
     }
 
+    /* one debounced entry point for everything painted onto catalog
+       cards: KP/IMDB ratings and the series airing-status badge */
+    function runCatalogCardScans(root) {
+        scanCatalogCardsForKinopoisk(root);
+        scanCardsForAirStatus(root);
+    }
+
     function scheduleCatalogCardScan(root, debounceMs) {
         if (debounceMs === undefined) debounceMs = CATALOG_SCAN_DEBOUNCE_MS;
         if (_kpCardScanTimer) clearTimeout(_kpCardScanTimer);
         if (debounceMs <= 0) {
-            scanCatalogCardsForKinopoisk(root);
+            runCatalogCardScans(root);
             return;
         }
         _kpCardScanTimer = setTimeout(function () {
             _kpCardScanTimer = null;
-            scanCatalogCardsForKinopoisk(root);
+            runCatalogCardScans(root);
         }, debounceMs);
     }
 
@@ -574,7 +581,7 @@
                (for card_data that mirrors a tick later) merges into the
                shared debounced scan instead of running unconditionally */
             setTimeout(function () {
-                scanCatalogCardsForKinopoisk(scope);
+                runCatalogCardScans(scope);
             }, 0);
             scheduleCatalogCardScan(getCatalogScanRoot());
             return ret;
@@ -980,7 +987,7 @@
 
         new MutationObserver(function (mutations) {
             if (_schedulePatchScrolls) _schedulePatchScrolls();
-            if (miEnabled('mi_rating') && mutationAddsCards(mutations)) {
+            if ((miEnabled('mi_rating') || miEnabled('mi_air_status')) && mutationAddsCards(mutations)) {
                 scheduleCatalogCardScan(getCatalogScanRoot());
             }
         }).observe(document.body, { childList: true, subtree: true });
@@ -1103,8 +1110,11 @@
     }
 
     /* ================================================================
-     * Airing status instead of the TV badge on the film page poster
-     * (series only; stock start.js stamps a static "TV" card__type)
+     * Airing status instead of the TV badge - on the film page poster
+     * (status comes free with the movie data) and on every catalog
+     * card with a TV badge (list results carry no status field, so
+     * cards need a cached tv/{id} detail lookup; film page visits
+     * seed the cache for free)
      * ================================================================ */
 
     var TV_STATUS_KEYS = {
@@ -1117,6 +1127,123 @@
         'pilot': 'mi_status_pilot'
     };
 
+    var STATUS_CACHE_MAX = 500;
+    var STATUS_FINAL_TTL_MS = 30 * 24 * 60 * 60 * 1000; /* ended/canceled do not change */
+    var STATUS_LIVE_TTL_MS = 3 * 24 * 60 * 60 * 1000;   /* returning/planned/... can */
+    var STATUS_RETRY_MS = 20000;                        /* failed/in-flight fetch cooldown */
+
+    var _miStatusInflight = {};
+    var _miStatusFail = {};
+    var _miStatusPersistTimer = null;
+
+    function statusCacheMap() {
+        return Lampa.Storage.cache('mi_status_cache', STATUS_CACHE_MAX, {});
+    }
+
+    function statusEntryTtl(entry) {
+        var key = TV_STATUS_KEYS[entry.s];
+        if (key === 'mi_status_ended' || key === 'mi_status_canceled') return STATUS_FINAL_TTL_MS;
+        return STATUS_LIVE_TTL_MS;
+    }
+
+    /* card scans fire in bursts - one trailing write instead of a
+       full-map serialization per fetched series */
+    function persistStatusCache() {
+        if (_miStatusPersistTimer) return;
+        _miStatusPersistTimer = setTimeout(function () {
+            _miStatusPersistTimer = null;
+            Lampa.Storage.set('mi_status_cache', statusCacheMap(), true);
+        }, 600);
+    }
+
+    function flushStatusCache() {
+        if (!_miStatusPersistTimer) return;
+        clearTimeout(_miStatusPersistTimer);
+        _miStatusPersistTimer = null;
+        Lampa.Storage.set('mi_status_cache', statusCacheMap(), true);
+    }
+
+    function rememberStatus(id, status) {
+        var idKey = String(id);
+        var map = statusCacheMap();
+        var entry = map[idKey];
+        var s = String(status || '').toLowerCase();
+        if (entry && entry.s === s) {
+            entry.t = new Date().getTime();
+        } else {
+            entry = map[idKey] = { s: s, t: new Date().getTime() };
+        }
+        persistStatusCache();
+        return entry;
+    }
+
+    function readStatusEntry(id) {
+        var entry = statusCacheMap()[String(id)];
+        if (!entry || typeof entry.t !== 'number') return null;
+        if ((new Date().getTime() - entry.t) > statusEntryTtl(entry)) return null;
+        return entry;
+    }
+
+    function paintStatusBadge(cardEl, entry) {
+        var key = TV_STATUS_KEYS[entry.s];
+        if (!key) return; /* unknown/missing status: keep the stock TV badge */
+        var badge = cardEl.querySelector('.card__view .card__type');
+        if (badge) badge.textContent = translate(key);
+    }
+
+    function markStatusApplied(cardEl, id, entry) {
+        if (cardEl.dataset) cardEl.dataset.miStatusId = String(id) + ':' + entry.t;
+    }
+
+    function fetchAirStatus(id, cardEl) {
+        _miStatusInflight[id] = new Date().getTime();
+        var url = Lampa.TMDB.api('tv/' + id + '?api_key=' + Lampa.TMDB.key());
+        $.get(url, function (resp) {
+            delete _miStatusInflight[id];
+            var entry = rememberStatus(id, resp && resp.status);
+            if (cardEl && document.body.contains(cardEl)) {
+                paintStatusBadge(cardEl, entry);
+                markStatusApplied(cardEl, id, entry);
+            }
+            /* the same series can sit in several rows - the shared
+               debounced scan paints the duplicates from cache */
+            scheduleCatalogCardScan(getCatalogScanRoot());
+        }).fail(function () {
+            delete _miStatusInflight[id];
+            _miStatusFail[id] = new Date().getTime();
+        });
+    }
+
+    function scanCardsForAirStatus(root) {
+        if (!miEnabled('mi_air_status')) return;
+        var el = root;
+        if (!el) el = document.body;
+        if (el && el.jquery) el = el[0];
+        if (!el || !el.querySelectorAll) return;
+        var now = new Date().getTime();
+        /* card--tv marks exactly the cards that carry the TV badge */
+        var cards = el.querySelectorAll('.card.card--tv');
+        for (var i = 0; i < cards.length; i++) {
+            var c = cards[i];
+            var data = getCardMovieData(c);
+            /* real TMDB ids only - skips the DOM-fallback synthetic ids */
+            if (!data || data.id === undefined || data.id === null || !/^\d+$/.test(String(data.id))) continue;
+            var id = String(data.id);
+            var entry = readStatusEntry(id);
+            if (entry) {
+                if (c.dataset && c.dataset.miStatusId === id + ':' + entry.t) continue;
+                paintStatusBadge(c, entry);
+                markStatusApplied(c, id, entry);
+                continue;
+            }
+            var failTs = _miStatusFail[id];
+            if (failTs && (now - failTs) < STATUS_RETRY_MS) continue;
+            var inflightTs = _miStatusInflight[id];
+            if (inflightTs && (now - inflightTs) < STATUS_RETRY_MS) continue;
+            fetchAirStatus(id, c);
+        }
+    }
+
     function initAirStatus() {
         Lampa.Listener.follow('full', function (e) {
             if (e.type !== 'complite') return;
@@ -1125,11 +1252,21 @@
             var movie = e.data && e.data.movie;
             if (!movie || !movie.name || !movie.status) return; /* series only */
 
+            /* free cache seed for the card badges */
+            if (movie.id !== undefined && movie.id !== null && /^\d+$/.test(String(movie.id))) {
+                rememberStatus(movie.id, movie.status);
+            }
+
             var key = TV_STATUS_KEYS[String(movie.status).toLowerCase()];
             if (!key) return;
 
             var badge = e.object.activity.render().find('.full-start-new__poster .card__type');
             if (badge.length) badge.text(translate(key));
+        });
+
+        window.addEventListener('pagehide', flushStatusCache);
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) flushStatusCache();
         });
     }
 
@@ -1627,7 +1764,7 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.4.0';
+    var PLUGIN_VERSION = '1.5.0';
 
     function safeInit(name, fn) {
         try { fn(); }
