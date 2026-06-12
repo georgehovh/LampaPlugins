@@ -1106,22 +1106,22 @@
         return out;
     }
 
-    /* silence the harmless one-line-per-instance deprecation warnings
-       from the classic Card/InteractionLine components we reuse */
-    function quietDeprecated() {
-        if (window._miWarnFiltered) return;
-        window._miWarnFiltered = true;
-        var origWarn = console.warn;
-        console.warn = function (msg) {
-            if (typeof msg === 'string' && msg.indexOf('deprecated') !== -1 &&
-                /Card|InteractionLine|InteractionMain/.test(msg)) return;
-            return origWarn.apply(console, arguments);
-        };
-    }
+    /* The franchise More opens the STOCK category_full page (native
+       grid, native 20-per-page pagination, native scrolling). It feeds
+       through Lampa.Api.list - the dispatcher is a plain property on
+       the shared Api object, so wrapping it lets a plugin serve static
+       pages to the genuine component. The full parts list is fetched
+       from collection/{id} on the first page (the film-page row data is
+       capped at parts.slice(0,19) by the tmdb source itself). */
+
+    var FRANCHISE_URL_MARKER = 'mi_franchise_collection';
+    var FRANCHISE_PAGE_SIZE = 20;
 
     function openFranchisePage(collection) {
         Lampa.Activity.push({
-            component: 'mi_franchise_list',
+            url: FRANCHISE_URL_MARKER,
+            component: 'category_full',
+            source: 'tmdb',
             title: collection.name || translate('mi_franchise_title'),
             collection_id: collection.id,
             /* fallback when the collection refetch fails (already sorted) */
@@ -1130,116 +1130,50 @@
         });
     }
 
-    /* full grid page with every franchise part, oldest first */
-    function FranchiseListComponent(object) {
-        var self = this;
-        var html = document.createElement('div');
-        var scroll = null;
-        var body = null;
-        var cards = [];
-        var last = false;
-        var destroyed = false;
-
-        function openCard(cardEl, data) {
-            Lampa.Activity.push({
-                url: '',
-                component: 'full',
-                id: data.id,
-                method: data.name ? 'tv' : 'movie',
-                card: data,
-                source: data.source || 'tmdb'
+    function serveFranchisePage(params, oncomplite, onerror) {
+        function serve(all) {
+            if (!all.length) return onerror();
+            var page = params.page || 1;
+            oncomplite({
+                results: all.slice((page - 1) * FRANCHISE_PAGE_SIZE, page * FRANCHISE_PAGE_SIZE),
+                total_pages: Math.ceil(all.length / FRANCHISE_PAGE_SIZE),
+                page: page
             });
         }
 
-        function buildGrid(items) {
-            if (destroyed) return;
-            quietDeprecated();
-            for (var i = 0; i < items.length; i++) {
-                (function (item) {
-                    if (!item || item.id === undefined || item.id === null) return;
-                    item.source = item.source || 'tmdb';
-                    var card = new Lampa.Card(item, { object: object });
-                    card.create();
-                    card.onFocus = function (target) {
-                        last = target;
-                        scroll.update($(target), true);
-                    };
-                    card.onEnter = openCard;
-                    card.visible();
-                    body.appendChild(card.render(true));
-                    cards.push(card);
-                })(items[i]);
+        function stampSource(list) {
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] && !list[i].source) list[i].source = 'tmdb';
             }
-            scroll.append(body);
-            html.appendChild(scroll.render(true));
-            self.activity.loader(false);
-            self.activity.toggle();
+            return list;
         }
 
-        this.create = function () {
-            scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
-            body = document.createElement('div');
-            body.className = 'category-full';
-            this.activity.loader(true);
+        if (isArr(params.mi_all_parts)) return serve(params.mi_all_parts);
 
-            var fallback = isArr(object.parts) ? object.parts : [];
-            if (!object.collection_id) return buildGrid(fallback);
+        var lang = Lampa.Storage.get('language');
+        var url = Lampa.TMDB.api('collection/' + params.collection_id +
+            '?api_key=' + Lampa.TMDB.key() + '&language=' + lang);
+        $.get(url, function (resp) {
+            var parts = resp && isArr(resp.parts) && resp.parts.length
+                ? sortFranchiseParts(resp.parts)
+                : (isArr(params.parts) ? params.parts : []);
+            params.mi_all_parts = stampSource(parts);
+            serve(params.mi_all_parts);
+        }).fail(function () {
+            params.mi_all_parts = stampSource(isArr(params.parts) ? params.parts : []);
+            serve(params.mi_all_parts);
+        });
+    }
 
-            var lang = Lampa.Storage.get('language');
-            var url = Lampa.TMDB.api('collection/' + object.collection_id +
-                '?api_key=' + Lampa.TMDB.key() + '&language=' + lang);
-            $.get(url, function (resp) {
-                var parts = resp && isArr(resp.parts) ? resp.parts : null;
-                buildGrid(parts && parts.length ? sortFranchiseParts(parts) : fallback);
-            }).fail(function () {
-                buildGrid(fallback);
-            });
-        };
-
-        this.start = function () {
-            if (destroyed) return;
-            Lampa.Controller.add('content', {
-                link: this,
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
-                left: function () {
-                    if (Navigator.canmove('left')) Navigator.move('left');
-                    else Lampa.Controller.toggle('menu');
-                },
-                right: function () {
-                    if (Navigator.canmove('right')) Navigator.move('right');
-                },
-                up: function () {
-                    if (Navigator.canmove('up')) Navigator.move('up');
-                    else Lampa.Controller.toggle('head');
-                },
-                down: function () {
-                    if (Navigator.canmove('down')) Navigator.move('down');
-                },
-                back: function () {
-                    Lampa.Activity.backward();
-                }
-            });
-            Lampa.Controller.toggle('content');
-        };
-
-        this.render = function (js) {
-            return js ? html : $(html);
-        };
-
-        this.pause = function () {};
-        this.stop = function () {};
-
-        this.destroy = function () {
-            destroyed = true;
-            for (var i = 0; i < cards.length; i++) {
-                try { cards[i].destroy(); } catch (e) {}
+    function patchApiListForFranchise() {
+        if (window._miApiListPatched) return;
+        window._miApiListPatched = true;
+        var origList = Lampa.Api.list;
+        Lampa.Api.list = function (params, oncomplite, onerror) {
+            if (params && params.url === FRANCHISE_URL_MARKER) {
+                return serveFranchisePage(params, oncomplite, onerror);
             }
-            cards = [];
-            if (scroll) scroll.destroy();
-            $(html).remove();
+            return origList.apply(Lampa.Api, arguments);
         };
     }
 
@@ -1321,7 +1255,7 @@
             ensureFranchiseMoreCard(e);
         });
 
-        Lampa.Component.add('mi_franchise_list', FranchiseListComponent);
+        patchApiListForFranchise();
 
         /* full.js titles the collection row with title_collection -
            rename it to Franchise while the feature is on */
@@ -1989,7 +1923,7 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.6.1';
+    var PLUGIN_VERSION = '1.7.0';
 
     function safeInit(name, fn) {
         try { fn(); }
