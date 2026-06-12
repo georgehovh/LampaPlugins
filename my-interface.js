@@ -163,7 +163,13 @@
      * 2. KP / IMDB ratings (embedded rating.js)
      * ================================================================ */
 
-    var CACHE_TIME_MS = 60 * 60 * 24 * 1000;
+    var CACHE_TIME_MS = 60 * 60 * 24 * 1000;            /* zero/unmatched entries */
+    var KP_POSITIVE_TTL_MS = 7 * CACHE_TIME_MS;          /* real ratings barely change */
+    var KP_CACHE_MAX = 2000;
+    var KP_XML_TIMEOUT_MS = 3000;
+    var KP_XML_RETRY_MS = 10 * 60 * 1000;
+    var KP_INFLIGHT_STALE_MS = 20000;
+    var KP_FAIL_COOLDOWN_MS = 20000;
 
     var KP_RATING_XML_BASE_URL = 'https://rating.kinopoisk.ru/';
     var KP_API_BASE_URL = 'https://kinopoiskapiunofficial.tech/';
@@ -214,10 +220,88 @@
 
     function readKpCacheEntry(movieId, cacheMap) {
         var ts = new Date().getTime();
-        var cache = cacheMap || Lampa.Storage.cache('kp_rating', 500, {});
+        var cache = cacheMap || Lampa.Storage.cache('kp_rating', KP_CACHE_MAX, {});
         var e = cache[movieId];
-        if (!e || (ts - e.timestamp) > CACHE_TIME_MS) return null;
+        if (!e || (ts - e.timestamp) > kpEntryTtl(e)) return null;
         return e;
+    }
+
+    /* Per-entry TTL: real ratings barely change (7 days); zero entries
+       (no match / no rating) are re-checked daily */
+    function kpEntryTtl(entry) {
+        return (hasPositiveRating(entry.kp) || hasPositiveRating(entry.imdb)) ? KP_POSITIVE_TTL_MS : CACHE_TIME_MS;
+    }
+
+    /* Debounced persistence of the kp_rating map: mutations are visible
+       in memory immediately (Lampa.Storage memoizes the object), the
+       full-map localStorage write happens at most once per burst */
+    var _kpSaveTimer = null;
+    var _kpDirtySince = 0;
+    var _kpDirty = false;
+
+    function flushKpCache() {
+        if (_kpSaveTimer) {
+            clearTimeout(_kpSaveTimer);
+            _kpSaveTimer = null;
+        }
+        if (!_kpDirty) return;
+        _kpDirty = false;
+        _kpDirtySince = 0;
+        Lampa.Storage.set('kp_rating', Lampa.Storage.cache('kp_rating', KP_CACHE_MAX, {}), true);
+    }
+
+    function persistKpCache() {
+        var now = new Date().getTime();
+        _kpDirty = true;
+        if (!_kpDirtySince) _kpDirtySince = now;
+        if (now - _kpDirtySince > 5000) return flushKpCache();
+        if (_kpSaveTimer) clearTimeout(_kpSaveTimer);
+        _kpSaveTimer = setTimeout(flushKpCache, 600);
+    }
+
+    function enforceKpCacheCap(map) {
+        var keys = Object.keys(map);
+        while (keys.length > KP_CACHE_MAX) {
+            var oldestKey = null;
+            var oldestTs = Infinity;
+            for (var i = 0; i < keys.length; i++) {
+                var e = map[keys[i]];
+                var ts = e && e.timestamp ? e.timestamp : 0;
+                if (ts < oldestTs) {
+                    oldestTs = ts;
+                    oldestKey = keys[i];
+                }
+            }
+            if (oldestKey === null) break;
+            delete map[oldestKey];
+            keys = Object.keys(map);
+        }
+    }
+
+    /* One fetch chain per film id across catalog scans and the film
+       page, plus a short per-film cooldown after a failed fetch */
+    var _kpInflightIds = {};
+    var _kpFailCooldown = {};
+
+    /* Session circuit breaker for the TV-only rating.kinopoisk.ru XML
+       hop: after 3 network failures skip straight to the API (which was
+       paying the wait anyway); re-probe once every 10 minutes */
+    var _kpXmlFails = 0;
+    var _kpXmlOpenAt = 0;
+
+    function xmlBreakerOpen() {
+        if (_kpXmlFails < 3) return false;
+        if (new Date().getTime() - _kpXmlOpenAt >= KP_XML_RETRY_MS) {
+            _kpXmlFails = 2; /* half-open: allow one probe */
+            return false;
+        }
+        return true;
+    }
+
+    function countXmlFailure(xhr) {
+        if (xhr && xhr.status >= 400) return; /* host alive - not an outage */
+        _kpXmlFails++;
+        if (_kpXmlFails >= 3) _kpXmlOpenAt = new Date().getTime();
     }
 
     function getCatalogScanRoot() {
@@ -389,12 +473,17 @@
 
     var _kpCardScanTimer = null;
     var CATALOG_SCAN_DEBOUNCE_MS = 72;
-    var CATALOG_LAYER_MIRROR_MS = 42;
 
     function tryApplyCachedRatingToCard(cardEl, movieId, cardData, cacheMap) {
         var e = readKpCacheEntry(movieId, cacheMap);
         if (!e) return false;
+        /* applied marker keyed to id+timestamp: skip the DOM work when
+           this exact entry is already painted, repaint when the cache
+           entry changed (e.g. the full-page zero-retry corrected it) */
+        var marker = String(movieId) + ':' + e.timestamp;
+        if (cardEl.dataset && cardEl.dataset.kpRatedId === marker) return true;
         applyCardPosterRating(cardEl, e, cardData || getCardMovieData(cardEl));
+        if (cardEl.dataset) cardEl.dataset.kpRatedId = marker;
         return true;
     }
 
@@ -417,7 +506,8 @@
         if (!el) el = document.body;
         if (el && el.jquery) el = el[0];
         if (!el || !el.querySelectorAll) return;
-        var kpCache = Lampa.Storage.cache('kp_rating', 500, {});
+        var kpCache = Lampa.Storage.cache('kp_rating', KP_CACHE_MAX, {});
+        var now = new Date().getTime();
         var cards = el.querySelectorAll('.card');
         for (var i = 0; i < cards.length; i++) {
             var c = cards[i];
@@ -426,6 +516,8 @@
             if (!data || !data.id) continue;
             var mid = data.id;
             if (tryApplyCachedRatingToCard(c, mid, data, kpCache)) continue;
+            var failTs = _kpFailCooldown[String(mid)];
+            if (failTs && (now - failTs) < KP_FAIL_COOLDOWN_MS) continue;
             var inflight = c.dataset.kpInflightId;
             if (inflight === String(mid)) continue;
             c.dataset.kpInflightId = String(mid);
@@ -455,12 +547,13 @@
         Layer.visible = function (where) {
             var ret = orig.apply(this, arguments);
             var scope = where || getCatalogScanRoot();
-            function runScan() {
+            /* immediate pass on the freshly visible scope; the late pass
+               (for card_data that mirrors a tick later) merges into the
+               shared debounced scan instead of running unconditionally */
+            setTimeout(function () {
                 scanCatalogCardsForKinopoisk(scope);
-            }
-
-            setTimeout(runScan, 0);
-            setTimeout(runScan, CATALOG_LAYER_MIRROR_MS);
+            }, 0);
+            scheduleCatalogCardScan(getCatalogScanRoot());
             return ret;
         };
     }
@@ -484,7 +577,8 @@
         var search_year = parseInt((search_date + '').slice(0, 4));
         var orig = card.original_title || card.original_name;
         var kp_prox = '';
-        var kpRatingCacheMap = Lampa.Storage.cache('kp_rating', 500, {});
+        var kpRatingCacheMap = Lampa.Storage.cache('kp_rating', KP_CACHE_MAX, {});
+        var idKey = String(card.id);
         var params = {
             id: card.id,
             url: kp_prox + KP_API_BASE_URL,
@@ -494,6 +588,19 @@
             },
             cache_time: CACHE_TIME_MS
         };
+
+        /* one chain per film id: card scans skip when any chain for this
+           id is already in flight (the card repaints from cache on the
+           next scan); the film page always runs its own chain */
+        if (cardElement) {
+            var inflightTs = _kpInflightIds[idKey];
+            if (inflightTs && (new Date().getTime() - inflightTs) < KP_INFLIGHT_STALE_MS) {
+                if (cardElement.dataset) delete cardElement.dataset.kpInflightId;
+                return;
+            }
+        }
+        _kpInflightIds[idKey] = new Date().getTime();
+
         getRating();
 
         function getRating() {
@@ -501,7 +608,7 @@
             if (movieRating) {
                 var entry = movieRating[params.id];
 
-                if (fullRender && entry && !hasPositiveRating(entry.kp) && !hasPositiveRating(entry.imdb)) {
+                if (fullRender && entry && !entry.vz && !hasPositiveRating(entry.kp) && !hasPositiveRating(entry.imdb)) {
                     delete kpRatingCacheMap[params.id];
                     return searchFilm();
                 }
@@ -606,8 +713,29 @@
                     }
                 }
                 if (cards.length == 1 && is_sure) {
+                    /* v2.2 search items (imdbId path) already carry the
+                       ratings - cache and show them, skipping the whole
+                       detail round trip. Field-presence check: v2.1
+                       keyword items lack these keys entirely. */
+                    if (cards[0].ratingKinopoisk !== undefined || cards[0].ratingImdb !== undefined) {
+                        return _showRating(_setCache(params.id, {
+                            kp: cards[0].ratingKinopoisk,
+                            imdb: cards[0].ratingImdb,
+                            timestamp: new Date().getTime()
+                        }));
+                    }
+
+                    /* provisional poster paint from the v2.1 search
+                       snapshot while the authoritative fetch runs
+                       (not cached - the chain overwrites it) */
+                    if (cardElement) {
+                        var prov = parseFloat(cards[0].rating);
+                        if (!isNaN(prov) && prov > 0 && prov <= 10) {
+                            setCardVoteText(cardElement, formatRatingDisplay(prov));
+                        }
+                    }
+
                     var id = cards[0].kp_id || cards[0].kinopoisk_id || cards[0].kinopoiskId || cards[0].filmId;
-                    var has_native_requests = typeof AndroidJS !== 'undefined';
                     var base_search = function base_search() {
                         network.clear();
                         network.timeout(15000);
@@ -625,10 +753,10 @@
                         });
                     };
 
-                    if (!has_native_requests) return base_search();
+                    if (typeof AndroidJS === 'undefined' || xmlBreakerOpen()) return base_search();
 
                     network.clear();
-                    network.timeout(5000);
+                    network.timeout(KP_XML_TIMEOUT_MS);
                     network["native"](params.rating_url + id + '.xml', function (str) {
                         if (str.indexOf('<rating>') >= 0) {
                             try {
@@ -648,31 +776,37 @@
                                     imdb: ratingImdb,
                                     timestamp: new Date().getTime()
                                 });
+                                _kpXmlFails = 0;
                                 return _showRating(movieRating);
                             } catch (ex) {
                             }
                         }
+                        /* 200 without <rating> = block page or junk */
+                        countXmlFailure(null);
                         base_search();
                     }, function (a, c) {
+                        countXmlFailure(a);
                         base_search();
                     }, false, {
                         dataType: 'text'
                     });
                 } else {
-                    var movieRating = _setCache(params.id, {
+                    var zeroEntry = {
                         kp: 0,
                         imdb: 0,
                         timestamp: new Date().getTime()
-                    });
-                    return _showRating(movieRating);
+                    };
+                    if (fullRender) zeroEntry.vz = 1; /* verified zero: searched with full data */
+                    return _showRating(_setCache(params.id, zeroEntry));
                 }
             } else {
-                var _movieRating = _setCache(params.id, {
+                var _zeroEntry = {
                     kp: 0,
                     imdb: 0,
                     timestamp: new Date().getTime()
-                });
-                return _showRating(_movieRating);
+                };
+                if (fullRender) _zeroEntry.vz = 1;
+                return _showRating(_setCache(params.id, _zeroEntry));
             }
         }
 
@@ -699,6 +833,8 @@
         }
 
         function showError(error) {
+            delete _kpInflightIds[idKey];
+            _kpFailCooldown[idKey] = new Date().getTime();
             if (cardElement) {
                 if (cardElement.dataset) delete cardElement.dataset.kpInflightId;
                 return;
@@ -709,9 +845,9 @@
         function _getCache(movie) {
             var timestamp = new Date().getTime();
             if (kpRatingCacheMap[movie]) {
-                if ((timestamp - kpRatingCacheMap[movie].timestamp) > params.cache_time) {
+                if ((timestamp - kpRatingCacheMap[movie].timestamp) > kpEntryTtl(kpRatingCacheMap[movie])) {
                     delete kpRatingCacheMap[movie];
-                    Lampa.Storage.set('kp_rating', kpRatingCacheMap);
+                    persistKpCache();
                     return false;
                 }
             } else return false;
@@ -722,23 +858,28 @@
             var timestamp = new Date().getTime();
             if (!kpRatingCacheMap[movie]) {
                 kpRatingCacheMap[movie] = data;
-                Lampa.Storage.set('kp_rating', kpRatingCacheMap);
+                enforceKpCacheCap(kpRatingCacheMap);
+                persistKpCache();
             } else {
                 if ((timestamp - kpRatingCacheMap[movie].timestamp) > params.cache_time) {
                     data.timestamp = timestamp;
                     kpRatingCacheMap[movie] = data;
-                    Lampa.Storage.set('kp_rating', kpRatingCacheMap);
+                    persistKpCache();
                 } else data = kpRatingCacheMap[movie];
             }
             return data;
         }
 
         function _showRating(data) {
+            delete _kpInflightIds[idKey];
             if (!data) return;
 
             if (cardElement) {
                 applyCardPosterRating(cardElement, data, card);
-                if (cardElement.dataset) delete cardElement.dataset.kpInflightId;
+                if (cardElement.dataset) {
+                    cardElement.dataset.kpRatedId = String(card.id) + ':' + (data.timestamp || '');
+                    delete cardElement.dataset.kpInflightId;
+                }
                 return;
             }
 
@@ -781,6 +922,29 @@
 
     function initRatings() {
         console.log('My Interface:', 'ratings ' + (miEnabled('mi_rating') ? 'enabled' : 'DISABLED via the mi_rating setting'));
+
+        /* one-time prune of expired entries so the cache cap binds on
+           live data, then a single write */
+        var bootMap = Lampa.Storage.cache('kp_rating', KP_CACHE_MAX, {});
+        var bootNow = new Date().getTime();
+        var pruned = false;
+        for (var bk in bootMap) {
+            if (bootMap.hasOwnProperty(bk)) {
+                var be = bootMap[bk];
+                if (!be || !be.timestamp || (bootNow - be.timestamp) > kpEntryTtl(be)) {
+                    delete bootMap[bk];
+                    pruned = true;
+                }
+            }
+        }
+        if (pruned) Lampa.Storage.set('kp_rating', bootMap, true);
+
+        /* the debounced cache writes need a flush on app exit/background
+           (Android TV kills the WebView from catalog screens mid-burst) */
+        window.addEventListener('pagehide', flushKpCache);
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) flushKpCache();
+        });
 
         patchScrollAppendMirrorCardData();
         patchLayerVisibleForCatalog();
@@ -1317,7 +1481,7 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.2.2';
+    var PLUGIN_VERSION = '1.3.0';
 
     function safeInit(name, fn) {
         try { fn(); }
