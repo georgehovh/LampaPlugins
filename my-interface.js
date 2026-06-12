@@ -21,6 +21,17 @@
         mi_logo_descr: { en: 'Show the movie logo image instead of the text title', ru: 'Отображать логотип фильма вместо текстового названия' },
         mi_allbtn_name: { en: 'Show all buttons', ru: 'Показывать все кнопки' },
         mi_allbtn_descr: { en: 'Show every source button on the film page instead of the sources menu', ru: 'Показывать все кнопки источников в карточке вместо меню источников' },
+        mi_franchise_name: { en: 'Franchise instead of Similar', ru: 'Франшиза вместо похожих' },
+        mi_franchise_descr: { en: 'When a film belongs to a franchise, show its parts instead of the Similar row', ru: 'Если фильм входит во франшизу, показывать её части вместо строки похожих' },
+        mi_franchise_title: { en: 'Franchise', ru: 'Франшиза' },
+        mi_air_status_name: { en: 'Series status on poster', ru: 'Статус сериала на постере' },
+        mi_air_status_descr: { en: 'Replace the TV badge on the film page poster with the airing status', ru: 'Заменять значок TV на постере статусом выхода сериала' },
+        mi_status_returning: { en: 'Returning', ru: 'Онгоинг' },
+        mi_status_ended: { en: 'Ended', ru: 'Завершён' },
+        mi_status_canceled: { en: 'Canceled', ru: 'Отменён' },
+        mi_status_in_production: { en: 'In Production', ru: 'В производстве' },
+        mi_status_planned: { en: 'Planned', ru: 'Запланирован' },
+        mi_status_pilot: { en: 'Pilot', ru: 'Пилот' },
 
         mi_head_button: { en: 'Header elements', ru: 'Элементы шапки' },
         mi_head_descr: { en: 'Show or hide icons in the header', ru: 'Показать или скрыть иконки в шапке' },
@@ -118,6 +129,18 @@
             component: 'my_interface',
             param: { name: 'mi_all_buttons', type: 'trigger', default: true },
             field: { name: translate('mi_allbtn_name'), description: translate('mi_allbtn_descr') }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'my_interface',
+            param: { name: 'mi_franchise', type: 'trigger', default: true },
+            field: { name: translate('mi_franchise_name'), description: translate('mi_franchise_descr') }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'my_interface',
+            param: { name: 'mi_air_status', type: 'trigger', default: true },
+            field: { name: translate('mi_air_status_name'), description: translate('mi_air_status_descr') }
         });
 
         Lampa.Template.add('settings_my_interface_head', '<div></div>');
@@ -981,7 +1004,35 @@
      * 3. TMDB logo instead of the title (ported logo.js)
      * ================================================================ */
 
+    var LOGO_CACHE_MAX = 500;
+    var LOGO_FOUND_TTL_MS = 30 * 24 * 60 * 60 * 1000; /* logos basically never change */
+    var LOGO_MISS_TTL_MS = 24 * 60 * 60 * 1000;       /* films without a logo: re-check daily */
+
     function initLogos() {
+        function applyLogo(e, path) {
+            if (!path) return;
+            e.object.activity.render().find('.full-start-new__title').html(
+                '<img style="margin-top:5px;max-height:125px;" src="' + Lampa.TMDB.image('/t/p/w300' + path.replace('.svg', '.png')) + '"/>'
+            );
+        }
+
+        /* prefer the UI language, then English, then language-neutral */
+        function pickLogo(logos, lang) {
+            var best = null;
+            var bestScore = 0;
+            for (var i = 0; i < logos.length; i++) {
+                var l = logos[i];
+                if (!l || !l.file_path) continue;
+                var score = l.iso_639_1 === lang ? 3 : l.iso_639_1 === 'en' ? 2 : !l.iso_639_1 ? 1 : 0;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = l.file_path;
+                }
+            }
+            if (!best && logos[0] && logos[0].file_path) best = logos[0].file_path;
+            return best || '';
+        }
+
         Lampa.Listener.follow('full', function (e) {
             if (e.type != 'complite') return;
             if (!miEnabled('mi_logo')) return;
@@ -991,18 +1042,94 @@
             if (movie.id === '' || movie.id === undefined || movie.id === null) return;
 
             var type = movie.name ? 'tv' : 'movie';
-            var url = Lampa.TMDB.api(type + '/' + movie.id + '/images?api_key=' + Lampa.TMDB.key() + '&language=' + Lampa.Storage.get('language'));
+            var lang = Lampa.Storage.get('language');
+            var cacheKey = type + '_' + movie.id + '_' + lang;
+            var cache = Lampa.Storage.cache('mi_logo_cache', LOGO_CACHE_MAX, {});
+            var entry = cache[cacheKey];
+
+            if (entry && (new Date().getTime() - entry.t) < (entry.p ? LOGO_FOUND_TTL_MS : LOGO_MISS_TTL_MS)) {
+                return applyLogo(e, entry.p);
+            }
+
+            var url = Lampa.TMDB.api(type + '/' + movie.id + '/images?api_key=' + Lampa.TMDB.key() +
+                '&language=' + lang + '&include_image_language=' + lang + ',en,null');
 
             $.get(url, function (resp) {
-                if (resp.logos && resp.logos[0]) {
-                    var logo = resp.logos[0].file_path;
-                    if (logo != '') {
-                        e.object.activity.render().find('.full-start-new__title').html(
-                            '<img style="margin-top:5px;max-height:125px;" src="' + Lampa.TMDB.image('/t/p/w300' + logo.replace('.svg', '.png')) + '"/>'
-                        );
-                    }
-                }
+                var path = resp && resp.logos ? pickLogo(resp.logos, lang) : '';
+                cache[cacheKey] = { p: path, t: new Date().getTime() };
+                Lampa.Storage.set('mi_logo_cache', cache, true);
+                applyLogo(e, path);
             });
+        });
+    }
+
+    /* ================================================================
+     * Franchise instead of Similar on the film page.
+     *
+     * Both the tmdb and cub sources already fetch the film's collection
+     * (data.collection) when it belongs to one; full.js renders it as a
+     * row. The 'full' start event fires synchronously BEFORE the rows
+     * are built, so dropping data.simular there replaces Similar with
+     * the franchise. Films without a franchise keep Similar as is.
+     * (Recommendations stay stock: the KP similars endpoint returns no
+     * TMDB ids, so its items could not open film pages reliably.)
+     * ================================================================ */
+
+    function initFranchise() {
+        Lampa.Listener.follow('full', function (e) {
+            if (e.type !== 'start') return;
+            if (!miEnabled('mi_franchise')) return;
+
+            var d = e.data;
+            if (!d || !d.movie || !d.collection || !isArr(d.collection.results)) return;
+
+            /* a real franchise has at least one OTHER part */
+            var others = 0;
+            for (var i = 0; i < d.collection.results.length; i++) {
+                if (d.collection.results[i] && String(d.collection.results[i].id) !== String(d.movie.id)) others++;
+            }
+            if (others > 0) delete d.simular;
+        });
+
+        /* full.js titles the collection row with title_collection -
+           rename it to Franchise while the feature is on */
+        var origTranslate = Lampa.Lang.translate;
+        Lampa.Lang.translate = function (name, code) {
+            if (name === 'title_collection' && miEnabled('mi_franchise')) {
+                return origTranslate.call(Lampa.Lang, 'mi_franchise_title', code);
+            }
+            return origTranslate.apply(Lampa.Lang, arguments);
+        };
+    }
+
+    /* ================================================================
+     * Airing status instead of the TV badge on the film page poster
+     * (series only; stock start.js stamps a static "TV" card__type)
+     * ================================================================ */
+
+    var TV_STATUS_KEYS = {
+        'returning series': 'mi_status_returning',
+        'ended': 'mi_status_ended',
+        'canceled': 'mi_status_canceled',
+        'cancelled': 'mi_status_canceled',
+        'in production': 'mi_status_in_production',
+        'planned': 'mi_status_planned',
+        'pilot': 'mi_status_pilot'
+    };
+
+    function initAirStatus() {
+        Lampa.Listener.follow('full', function (e) {
+            if (e.type !== 'complite') return;
+            if (!miEnabled('mi_air_status')) return;
+
+            var movie = e.data && e.data.movie;
+            if (!movie || !movie.name || !movie.status) return; /* series only */
+
+            var key = TV_STATUS_KEYS[String(movie.status).toLowerCase()];
+            if (!key) return;
+
+            var badge = e.object.activity.render().find('.full-start-new__poster .card__type');
+            if (badge.length) badge.text(translate(key));
         });
     }
 
@@ -1330,25 +1457,44 @@
 
             CR.call = function (screen, params, calls) {
                 if (screen === 'bookmarks') {
-                    try { injectHistoryRegister(calls); }
+                    try {
+                        fixRegisterLimits(calls);
+                        injectHistoryRegister(calls);
+                    }
                     catch (e) { console.error('My Interface:', 'history register failed -', e && e.message ? e.message : e); }
                 }
                 return origCall.apply(CR, arguments);
             };
         }
 
+        /* the register line: entries carry count + createInstance */
+        function findRegisterLine(lines) {
+            for (var i = 0; i < lines.length; i++) {
+                var res = lines[i] && lines[i].results;
+                if (isArr(res) && res.length && res[0] && res[0].count !== undefined && res[0].params && res[0].params.createInstance) {
+                    return res;
+                }
+            }
+            return null;
+        }
+
+        /* under CUB sync the category buttons render "3 / 500" - show
+           just the count (register/module/line.js appends the "/ limit"
+           span only when limit is truthy) */
+        function fixRegisterLimits(lines) {
+            if (!isArr(lines)) return;
+            var register = findRegisterLine(lines);
+            if (!register) return;
+            for (var i = 0; i < register.length; i++) {
+                register[i].limit = 0;
+            }
+        }
+
         function injectHistoryRegister(lines) {
             if (!isArr(lines)) return;
             if (state.defaults.hidden.indexOf('history') >= 0) return;
 
-            var register = null;
-            for (var i = 0; i < lines.length; i++) {
-                var res = lines[i] && lines[i].results;
-                if (isArr(res) && res.length && res[0] && res[0].count !== undefined && res[0].params && res[0].params.createInstance) {
-                    register = res;
-                    break;
-                }
-            }
+            var register = findRegisterLine(lines);
             if (!register) return;
 
             for (var j = 0; j < register.length; j++) {
@@ -1364,7 +1510,7 @@
                 mi_history: true,
                 title: Lampa.Lang.translate('title_history'),
                 count: cards.length,
-                limit: sample.limit !== undefined ? sample.limit : 0,
+                limit: 0,
                 params: {
                     module: sample.params.module,
                     createInstance: sample.params.createInstance,
@@ -1481,7 +1627,7 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.3.0';
+    var PLUGIN_VERSION = '1.4.0';
 
     function safeInit(name, fn) {
         try { fn(); }
@@ -1509,6 +1655,8 @@
         safeInit('settings', initSettings);
         safeInit('head-filter', initHeadFilter);
         safeInit('logos', initLogos);
+        safeInit('franchise', initFranchise);
+        safeInit('air-status', initAirStatus);
         safeInit('all-buttons', initAllButtons);
         safeInit('ratings', initRatings);
         safeInit('favorites', MyFavorites.init);
