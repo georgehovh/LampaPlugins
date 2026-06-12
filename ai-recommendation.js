@@ -40,10 +40,12 @@
         ai_rec_clear_descr: { en: 'Delete the saved recommendations and the whole conversation', ru: 'Удалить сохранённые рекомендации и весь диалог' },
         ai_rec_cleared: { en: 'Chat cleared', ru: 'Чат очищен' },
         ai_rec_top_title: { en: 'Recommended for you', ru: 'Рекомендовано для вас' },
+        ai_rec_top_movies: { en: 'Recommended movies', ru: 'Рекомендованные фильмы' },
+        ai_rec_top_tv: { en: 'Recommended series', ru: 'Рекомендованные сериалы' },
         ai_rec_ask: { en: 'Ask AI for recommendations...', ru: 'Спросить ИИ о рекомендациях...' },
         ai_rec_prompt_title: { en: 'Describe what to recommend', ru: 'Опишите, что порекомендовать' },
         ai_rec_no_key: { en: 'Enter your Gemini API key in Settings - AI Recommendations', ru: 'Укажите API-ключ Gemini в Настройки - ИИ рекомендации' },
-        ai_rec_no_likes: { en: 'Add films to Likes to get personal recommendations', ru: 'Добавьте фильмы в Нравится, чтобы получить персональные рекомендации' },
+        ai_rec_no_likes: { en: 'Add films to your favorites (likes, bookmarks, history) to get personal recommendations', ru: 'Добавьте фильмы в избранное (нравится, закладки, история), чтобы получить персональные рекомендации' },
         ai_rec_loading: { en: 'Asking AI...', ru: 'Спрашиваю ИИ...' },
         ai_rec_error: { en: 'AI request failed', ru: 'Запрос к ИИ не удался' },
         ai_rec_quota: { en: 'Gemini quota exceeded, try later', ru: 'Квота Gemini исчерпана, попробуйте позже' },
@@ -66,16 +68,16 @@
      * 2. Constants and settings access
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.2.1';
+    var PLUGIN_VERSION = '1.3.0';
     var COMPONENT_NAME = 'ai_recs_gemini'; /* 'ai_recommendations' is taken by a stock CUB component */
     var LIST_URL_MARKER = 'ai_recs_list_data';
-    var LIST_PAGE_SIZE = 20;
     var CHAT_KEY = 'ai_rec_chat';
-    var LIST_TOTAL = 30;
-    var LIST_BATCH = 10;
+    var LIST_TOTAL = 30;      /* raw recs asked per list (chat turns; 30+30 for the two top lists) */
+    var LIST_BATCH = 10;      /* cards shown in a row */
+    var PAGE1_TARGET = 20;    /* the list page shows the row's 10 + 10 more */
+    var EXTEND_COUNT = 30;    /* the in-page More asks Gemini for 30 extra, then no more More */
     var MAX_TURNS = 12;
-    var LIKES_CAP = 80;
-    var HISTORY_CAP = 150;
+    var LIBRARY_CAP = 200;    /* favorites lines included in the prompt */
 
     var GEMINI_CASCADE = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
     var _stickyModel = null; /* the first cascade model that answered this session */
@@ -237,6 +239,26 @@
         return year ? title + ' (' + year + ')' : title;
     }
 
+    /* the taste basis AND the exclusion set: the union of EVERY
+       favorites list (likes, bookmarks, plans, history, watched, ...) */
+    var LIBRARY_CATEGORIES = ['like', 'book', 'wath', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
+
+    function libraryCards() {
+        var seen = {};
+        var out = [];
+        for (var c = 0; c < LIBRARY_CATEGORIES.length; c++) {
+            var cards = favCards(LIBRARY_CATEGORIES[c]);
+            for (var i = 0; i < cards.length; i++) {
+                var card = cards[i];
+                if (!card || card.id === undefined || card.id === null) continue;
+                if (seen['m' + card.id]) continue;
+                seen['m' + card.id] = true;
+                out.push(card);
+            }
+        }
+        return out;
+    }
+
     function promptList(cards, cap) {
         var out = [];
         for (var i = 0; i < cards.length && out.length < cap; i++) {
@@ -246,17 +268,17 @@
         return out.length ? out.join('\n') : '- (none)';
     }
 
+    var EXCLUSION_REMINDER = ' Strictly exclude EVERYTHING from the user\'s library above and anything already recommended in this conversation.';
+
     function basePrompt() {
-        var likes = favCards('like');
-        var history = favCards('history');
         return 'You are a film recommendation engine.\n' +
-            'The user LIKES these films and series:\n' + promptList(likes, LIKES_CAP) + '\n\n' +
-            'The user has ALREADY SEEN these (do not recommend them):\n' + promptList(history, HISTORY_CAP) + '\n\n' +
-            'Recommend exactly ' + LIST_TOTAL + ' movies or TV series the user is most likely to enjoy, ' +
-            'ordered from most recommended to least recommended.\n' +
-            'Rules:\n' +
+            'The user\'s library - films and series they liked, bookmarked, planned or already watched. ' +
+            'This is the taste profile to base every recommendation on, and NOTHING from it may ever be recommended:\n' +
+            promptList(libraryCards(), LIBRARY_CAP) + '\n\n' +
+            'Rules for every answer in this conversation:\n' +
             '- Only real, existing titles that can be found on themoviedb.org.\n' +
-            '- Never recommend anything from the LIKES or ALREADY SEEN lists, and never repeat a title you already recommended in this conversation.\n' +
+            '- NEVER recommend anything from the user\'s library above, and never repeat a title you already recommended in this conversation.\n' +
+            '- Order results from most recommended to least recommended.\n' +
             '- "title": the English title. "original_title": the title in its original language. "year": the first release year. "type": "movie" or "tv".';
     }
 
@@ -272,29 +294,36 @@
         return 'I recommended: ' + (all.join('; ') || '(nothing)');
     }
 
-    /* conversation context: base prompt, then each exchange compacted;
-       the final turn must always be a user turn */
-    function buildContents(chat, newPrompt) {
+    /* conversation context: base prompt, the two top lists and each
+       exchange compacted as model turns; finalInstruction must come
+       from the caller and always ends the contents as a user turn */
+    function buildContents(chat, finalInstruction) {
         var contents = [{ role: 'user', parts: [{ text: basePrompt() }] }];
-        if (chat.top) contents.push({ role: 'model', parts: [{ text: compactModelTurn(chat.top) }] });
+        if (chat.tops && chat.tops.movie) contents.push({ role: 'model', parts: [{ text: compactModelTurn(chat.tops.movie) }] });
+        if (chat.tops && chat.tops.tv) contents.push({ role: 'model', parts: [{ text: compactModelTurn(chat.tops.tv) }] });
         for (var i = 0; i < chat.turns.length; i++) {
             var t = chat.turns[i];
             contents.push({ role: 'user', parts: [{ text: t.prompt }] });
             contents.push({ role: 'model', parts: [{ text: compactModelTurn(t) }] });
         }
-        var exclusionReminder = ' Strictly exclude EVERYTHING from the LIKES and ALREADY SEEN lists above and anything already recommended in this conversation.';
-        if (newPrompt) {
-            contents.push({
-                role: 'user',
-                parts: [{ text: newPrompt + '\n\nRecommend exactly ' + LIST_TOTAL + ' NEW items for this request, following the same rules and JSON format.' + exclusionReminder }]
-            });
-        } else if (contents.length > 1) {
-            contents.push({
-                role: 'user',
-                parts: [{ text: 'Generate a fresh list of exactly ' + LIST_TOTAL + ' recommendations based on my tastes, following the same rules and JSON format.' + exclusionReminder }]
-            });
-        }
+        contents.push({ role: 'user', parts: [{ text: finalInstruction + EXCLUSION_REMINDER }] });
         return contents;
+    }
+
+    function topGenInstruction() {
+        return 'Generate exactly ' + (LIST_TOTAL * 2) + ' recommendations based on my library: ' +
+            LIST_TOTAL + ' MOVIES (type "movie") and ' + LIST_TOTAL + ' TV SERIES (type "tv"), ' +
+            'each group ordered most recommended first. Follow the rules and JSON format.';
+    }
+
+    function turnInstruction(prompt) {
+        return prompt + '\n\nRecommend exactly ' + LIST_TOTAL + ' NEW items for this request, following the same rules and JSON format.';
+    }
+
+    function extendInstruction(state) {
+        if (state.kind === 'movie') return 'Recommend exactly ' + EXTEND_COUNT + ' MORE movies (type "movie") based on my library, following the same rules and JSON format.';
+        if (state.kind === 'tv') return 'Recommend exactly ' + EXTEND_COUNT + ' MORE TV series (type "tv") based on my library, following the same rules and JSON format.';
+        return 'Recommend exactly ' + EXTEND_COUNT + ' MORE items for my earlier request: "' + (state.prompt || '') + '", following the same rules and JSON format.';
     }
 
     /* ================================================================
@@ -431,9 +460,12 @@
     function loadChat() {
         var chat = Lampa.Storage.get(CHAT_KEY, {});
         if (!chat || typeof chat !== 'object' || isArr(chat)) chat = {};
-        if (!chat.v) chat.v = 1;
         if (!isArr(chat.turns)) chat.turns = [];
-        if (chat.top && !isArr(chat.top.items)) chat.top = null;
+        if (!chat.tops || typeof chat.tops !== 'object') chat.tops = {};
+        if (chat.tops.movie && !isArr(chat.tops.movie.items)) chat.tops.movie = null;
+        if (chat.tops.tv && !isArr(chat.tops.tv.items)) chat.tops.tv = null;
+        if (chat.top) delete chat.top; /* v1 single-list schema - regenerate as movie+tv */
+        chat.v = 2;
         return chat;
     }
 
@@ -447,7 +479,7 @@
         Lampa.Storage.set(CHAT_KEY, {});
     }
 
-    /* ids of everything the user knows or was already shown */
+    /* ids of everything in the user's library or already shown */
     function knownIds(chat) {
         var ids = {};
         function addAll(cards) {
@@ -455,18 +487,26 @@
                 if (cards[i] && cards[i].id !== undefined) ids['m' + cards[i].id] = true;
             }
         }
-        addAll(favCards('like'));
-        addAll(favCards('history'));
-        if (chat.top) addAll(chat.top.items);
+        addAll(libraryCards());
+        if (chat.tops && chat.tops.movie) addAll(chat.tops.movie.items);
+        if (chat.tops && chat.tops.tv) addAll(chat.tops.tv.items);
         for (var t = 0; t < chat.turns.length; t++) addAll(chat.turns[t].items);
         return ids;
     }
 
-    /* Gemini recs -> a fresh list state {items, queue, shown, model, ts} */
-    function makeListState(recs, model, chat, cb) {
-        var state = { items: [], queue: recs.slice(0), shown: 0, model: model, ts: new Date().getTime() };
-        var excl = knownIds(chat);
-        resolveFromQueue(state, LIST_BATCH, excl, function (fresh) {
+    /* Gemini recs -> a fresh list state
+       {kind, items, queue, shown, extended, model, ts} */
+    function makeListState(recs, kind, model, chat, cb) {
+        var state = {
+            kind: kind,
+            items: [],
+            queue: recs.slice(0),
+            shown: 0,
+            extended: false,
+            model: model,
+            ts: new Date().getTime()
+        };
+        resolveFromQueue(state, LIST_BATCH, knownIds(chat), function (fresh) {
             state.items = fresh;
             state.shown = fresh.length;
             cb(state);
@@ -565,56 +605,147 @@
         } catch (e) {}
     }
 
-    /* the row shows only the first batch - More exists whenever the
-       full list holds (or can resolve) anything beyond it */
-    function listHasMore(state) {
-        return state.queue.length > 0 || state.items.length > state.shown;
-    }
-
     /* standard Lampa behavior: More opens the complete list as a STOCK
-       category_full page (native grid, native 20-per-page pagination,
-       native scrolling), fed through a wrapped Lampa.Api.list. The page
-       is addressed by 'top'/turn-index so it survives restarts. */
+       category_full page (native grid, native scrolling), fed through a
+       wrapped Lampa.Api.list. The page is addressed by
+       'top_movie'/'top_tv'/turn-index so it survives restarts. */
     function openListPage(lineData) {
         var prompt = lineData.ai_state && lineData.ai_state.prompt;
+        var title = prompt ||
+            (lineData.ai_kind === 'top_movie' ? translate('ai_rec_top_movies') :
+                lineData.ai_kind === 'top_tv' ? translate('ai_rec_top_tv') : translate('ai_rec_top_title'));
         Lampa.Activity.push({
             url: LIST_URL_MARKER,
             component: 'category_full',
             source: 'tmdb',
-            title: prompt || translate('ai_rec_top_title'),
-            ai_list: lineData.ai_kind === 'top' ? 'top' : lineData.ai_index,
+            title: title,
+            ai_list: lineData.ai_kind === 'turn' ? lineData.ai_index : lineData.ai_kind,
             page: 1
         });
     }
 
+    function stateFor(params, chat) {
+        if (params.ai_list === 'top_movie') return chat.tops.movie;
+        if (params.ai_list === 'top_tv') return chat.tops.tv;
+        return chat.turns[params.ai_list];
+    }
+
+    function sameListActivity(active, params) {
+        return active && active.url === LIST_URL_MARKER && active.ai_list === params.ai_list;
+    }
+
+    /* Page 1 = everything resolved so far, topped up to 20 (the row's
+       10 + 10 more) from the raw queue. While the list has not been
+       extended yet, a More poster card sits at the grid end - pressing
+       it asks Gemini for 30 extra and appends them as a native second
+       page. After that the More card is gone for good. */
     function serveListPage(params, oncomplite, onerror) {
+        if (params._ai_page2) {
+            var page2 = params._ai_page2;
+            params._ai_page2 = null;
+            var clones = [];
+            for (var j = 0; j < page2.length; j++) clones.push(cloneCard(page2[j]));
+            return oncomplite({ results: clones, total_pages: 2, page: 2 });
+        }
+
         var chat = loadChat();
-        var state = params.ai_list === 'top' ? chat.top : chat.turns[params.ai_list];
+        var state = stateFor(params, chat);
         if (!state || !isArr(state.items)) return onerror();
 
         function serve() {
             if (!state.items.length) return onerror();
-            var page = params.page || 1;
-            var from = (page - 1) * LIST_PAGE_SIZE;
-            var slice = [];
-            for (var i = from; i < state.items.length && i < from + LIST_PAGE_SIZE; i++) {
-                slice.push(cloneCard(state.items[i]));
-            }
-            oncomplite({
-                results: slice,
-                total_pages: Math.ceil(state.items.length / LIST_PAGE_SIZE),
-                page: page
-            });
+            params.page = 1;
+            var clones = [];
+            for (var i = 0; i < state.items.length; i++) clones.push(cloneCard(state.items[i]));
+            oncomplite({ results: clones, total_pages: 1, page: 1 });
+            if (!state.extended) scheduleExtendMoreCard(params, state, chat);
         }
 
-        if (!state.queue.length) return serve();
+        if (state.queue.length && state.items.length < PAGE1_TARGET) {
+            resolveFromQueue(state, PAGE1_TARGET - state.items.length, knownIds(chat), function (fresh) {
+                for (var i = 0; i < fresh.length; i++) state.items.push(fresh[i]);
+                saveChat(chat);
+                serve();
+            });
+        } else serve();
+    }
 
-        /* first visit: resolve everything still queued, persist, then serve */
-        resolveFromQueue(state, state.queue.length, knownIds(chat), function (fresh) {
-            for (var i = 0; i < fresh.length; i++) state.items.push(fresh[i]);
-            saveChat(chat);
-            serve();
+    /* the +30 step: one extra Gemini call within the conversation */
+    function extendList(params, state, chat, moreEl) {
+        if (_generating) return;
+        _generating = true;
+        var title = moreEl.querySelector('.card-more__title');
+        if (title) title.innerHTML = '...';
+
+        callGemini(buildContents(chat, extendInstruction(state)), function (recs) {
+            state.queue = state.queue.concat(recs);
+            resolveFromQueue(state, EXTEND_COUNT, knownIds(chat), function (fresh) {
+                _generating = false;
+                state.extended = true;
+                for (var i = 0; i < fresh.length; i++) state.items.push(fresh[i]);
+                saveChat(chat);
+                $(moreEl).remove();
+                if (!fresh.length) return Lampa.Noty.show(translate('ai_rec_nothing'));
+
+                /* native in-place append: serve the fresh items as page 2
+                   through the component's own next-page machinery */
+                var active = Lampa.Activity.active();
+                if (sameListActivity(active, params) && active.activity && active.activity.component) {
+                    params._ai_page2 = fresh;
+                    var comp = active.activity.component;
+                    comp.total_pages = 2;
+                    try { comp.emit('loadNext'); } catch (e) {}
+                }
+            });
+        }, function (message) {
+            _generating = false;
+            if (title) title.innerHTML = Lampa.Lang.translate('more');
+            Lampa.Noty.show(message);
         });
+    }
+
+    /* inject the More poster card at the end of the native grid once
+       the page has rendered its cards */
+    function scheduleExtendMoreCard(params, state, chat, attempt) {
+        attempt = attempt || 0;
+        if (attempt > 10) return;
+        setTimeout(function () {
+            var active = Lampa.Activity.active();
+            if (!sameListActivity(active, params)) return;
+            var root = active.activity.render(true);
+            var rootEl = root && root.jquery ? root[0] : root;
+            if (!rootEl) return;
+            var firstCard = rootEl.querySelector('.card');
+            if (!firstCard || !firstCard.parentElement) {
+                return scheduleExtendMoreCard(params, state, chat, attempt + 1);
+            }
+            var container = firstCard.parentElement;
+            if (container.querySelector('.ai-rec-extend')) return;
+
+            var more = Lampa.Template.js('more');
+            if (!more) return;
+            more.classList.add('selector');
+            more.classList.add('ai-rec-extend');
+            try {
+                var rect = firstCard.querySelector('.card__view').getBoundingClientRect();
+                if (rect && rect.height > 10) {
+                    more.style.width = (rect.width > rect.height ? rect.height : rect.width) + 'px';
+                    var box = more.querySelector('.card-more__box');
+                    if (box) box.style.height = rect.height + 'px';
+                    more.classList.add('card-more--fixed-size');
+                }
+            } catch (e) {}
+
+            $(more).on('hover:focus', function () {
+                try { active.activity.component.scroll.update(more, true); } catch (e) {}
+            });
+            $(more).on('hover:enter', function () {
+                extendList(params, state, chat, more);
+            });
+
+            container.appendChild(more);
+            try { Lampa.Controller.collectionAppend(more); } catch (e) {}
+        }, 350);
     }
 
     function patchApiList() {
@@ -674,15 +805,48 @@
         };
     }
 
-    function generateList(chat, prompt, ok, fail) {
+    /* a custom prompt -> one mixed list state */
+    function generateTurnList(chat, prompt, ok, fail) {
         if (_generating) return;
         _generating = true;
         Lampa.Noty.show(translate('ai_rec_loading'));
-        callGemini(buildContents(chat, prompt), function (recs, model) {
-            makeListState(recs, model, chat, function (state) {
+        callGemini(buildContents(chat, turnInstruction(prompt)), function (recs, model) {
+            makeListState(recs, 'mixed', model, chat, function (state) {
                 _generating = false;
                 if (!state.items.length) return fail(translate('ai_rec_nothing'));
                 ok(state);
+            });
+        }, function (message) {
+            _generating = false;
+            fail(message);
+        });
+    }
+
+    /* the two default lists: ONE Gemini call for 30 movies + 30 series,
+       split by type and resolved into two states */
+    function generateTops(chat, ok, fail) {
+        if (_generating) return;
+        _generating = true;
+        Lampa.Noty.show(translate('ai_rec_loading'));
+        callGemini(buildContents(chat, topGenInstruction()), function (recs, model) {
+            var movies = [];
+            var series = [];
+            for (var i = 0; i < recs.length; i++) {
+                if (!recs[i]) continue;
+                if (recs[i].type === 'tv') series.push(recs[i]);
+                else movies.push(recs[i]);
+            }
+            makeListState(movies, 'movie', model, chat, function (movieState) {
+                chat.tops.movie = movieState; /* visible to knownIds before the tv pass */
+                makeListState(series, 'tv', model, chat, function (tvState) {
+                    _generating = false;
+                    chat.tops.tv = tvState;
+                    if (!movieState.items.length && !tvState.items.length) {
+                        chat.tops.movie = chat.tops.tv = null;
+                        return fail(translate('ai_rec_nothing'));
+                    }
+                    ok();
+                });
             });
         }, function (message) {
             _generating = false;
@@ -697,7 +861,18 @@
         var comp = new Lampa.InteractionMain(object);
         var chat = null;
         var linesCount = 0;
-        var builtStamp; /* chat.updated at build time - resume staleness check */
+        var builtStamp; /* row fingerprint at build time - resume staleness check */
+
+        /* only list timestamps: queue resolutions elsewhere save the
+           chat too but don't change what the rows display */
+        function chatFingerprint(c) {
+            var parts = [
+                c.tops && c.tops.movie ? c.tops.movie.ts : 0,
+                c.tops && c.tops.tv ? c.tops.tv.ts : 0
+            ];
+            for (var i = 0; i < c.turns.length; i++) parts.push(c.turns[i].ts);
+            return parts.join(':');
+        }
 
         function lineFor(state, title, kind, index) {
             var results = [];
@@ -725,8 +900,11 @@
 
         function buildLines() {
             var lines = [];
-            if (chat.top && chat.top.items.length) {
-                lines.push(lineFor(chat.top, escapeHtml(translate('ai_rec_top_title')), 'top'));
+            if (chat.tops.movie && chat.tops.movie.items.length) {
+                lines.push(lineFor(chat.tops.movie, escapeHtml(translate('ai_rec_top_movies')), 'top_movie'));
+            }
+            if (chat.tops.tv && chat.tops.tv.items.length) {
+                lines.push(lineFor(chat.tops.tv, escapeHtml(translate('ai_rec_top_tv')), 'top_tv'));
             }
             for (var i = 0; i < chat.turns.length; i++) {
                 var t = chat.turns[i];
@@ -741,7 +919,7 @@
                 ai_kind: 'input'
             });
             linesCount = lines.length;
-            builtStamp = chat.updated;
+            builtStamp = chatFingerprint(chat);
             comp.build(lines);
 
             if (_focusBottom) {
@@ -775,15 +953,9 @@
 
         function submitPrompt(text) {
             comp.activity.loader(true);
-            generateList(chat, text, function (state) {
-                chat.turns.push({
-                    prompt: text,
-                    ts: state.ts,
-                    model: state.model,
-                    items: state.items,
-                    queue: state.queue,
-                    shown: state.shown
-                });
+            generateTurnList(chat, text, function (state) {
+                state.prompt = text;
+                chat.turns.push(state);
                 saveChat(chat);
                 comp.activity.loader(false);
                 if (pageStillActive()) {
@@ -823,36 +995,42 @@
         };
 
         /* a chat response that arrived while another page was on screen
-           was saved but not rendered - rebuild when this page resumes */
+           was saved but not rendered - rebuild when this page resumes.
+           The fingerprint tracks only ROW-relevant changes (list ts):
+           a queue resolution on a More page also saves the chat, and
+           rebuilding for that during the back transition caused black
+           screens. Any rebuild is deferred until after start(). */
         var origStart = comp.start;
         comp.start = function () {
-            if (builtStamp !== undefined && !_generating) {
-                var current = loadChat();
-                if (current.updated !== undefined && current.updated !== builtStamp) {
-                    chat = current;
-                    return Lampa.Activity.replace({});
-                }
+            var out = origStart.apply(comp, arguments);
+            if (builtStamp !== undefined && !_generating &&
+                chatFingerprint(loadChat()) !== builtStamp) {
+                chat = loadChat();
+                setTimeout(function () {
+                    if (pageStillActive() && !_generating) Lampa.Activity.replace({});
+                }, 120);
             }
-            return origStart.apply(comp, arguments);
+            return out;
         };
 
         comp.create = function () {
             this.activity.loader(true);
             chat = loadChat();
 
-            if (chat.top && chat.top.items.length) return buildLines(); /* restore the session */
+            var topsReady = chat.tops.movie && chat.tops.movie.items.length &&
+                chat.tops.tv && chat.tops.tv.items.length;
+            if (topsReady) return buildLines(); /* restore the session */
 
             if (!geminiKey()) {
                 Lampa.Noty.show(translate('ai_rec_no_key'));
                 return buildLines();
             }
-            if (!favCards('like').length) {
+            if (!libraryCards().length) {
                 Lampa.Noty.show(translate('ai_rec_no_likes'));
                 return buildLines();
             }
 
-            generateList(chat, null, function (state) {
-                chat.top = state;
+            generateTops(chat, function () {
                 saveChat(chat);
                 buildLines();
             }, function (message) {
@@ -871,8 +1049,8 @@
             if (e.type !== 'visible' && e.type !== 'append') return;
             if (!e.data || !e.data.ai_kind) return;
 
-            if (e.data.ai_kind === 'top' || e.data.ai_kind === 'turn') {
-                if (listHasMore(e.data.ai_state)) ensureMoreCard(e);
+            if (e.data.ai_kind === 'top_movie' || e.data.ai_kind === 'top_tv' || e.data.ai_kind === 'turn') {
+                ensureMoreCard(e); /* every list has a full page behind it */
             }
         });
     }
