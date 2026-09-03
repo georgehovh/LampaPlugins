@@ -57,7 +57,10 @@
         mi_favs_visible: { en: 'Visible', ru: 'Отображается' },
         mi_favs_hide: { en: 'Hide', ru: 'Скрыть' },
         mi_favs_show: { en: 'Show', ru: 'Показывать' },
-        mi_favs_reset_name: { en: 'Reset name', ru: 'Сбросить название' }
+        mi_favs_reset_name: { en: 'Reset name', ru: 'Сбросить название' },
+
+        mi_account_email_name: { en: 'Lampac account email', ru: 'Email аккаунта Lampac' },
+        mi_account_email_descr: { en: 'Identifies you on your Lampac server - bookmark sync and server backups are keyed to it and survive reinstalls (the device id does not)', ru: 'Идентифицирует вас на вашем сервере Lampac - синхронизация закладок и бэкапы на сервере привязаны к нему и переживают переустановку (ID устройства - нет)' }
     });
 
     /* ================================================================
@@ -179,6 +182,14 @@
             onChange: function () {
                 MyFavorites.openDefaults();
             }
+        });
+
+        /* Lampac's bookmark.js and backup.js key the server-side data on
+           account_email, but stock Lampa offers no place to enter it */
+        Lampa.SettingsApi.addParam({
+            component: 'my_interface',
+            param: { name: 'account_email', type: 'input', values: '', placeholder: 'user@example.com', default: '' },
+            field: { name: translate('mi_account_email_name'), description: translate('mi_account_email_descr') }
         });
     }
 
@@ -1776,13 +1787,42 @@
 
         /* under CUB sync the category buttons render "3 / 500" - show
            just the count (register/module/line.js appends the "/ limit"
-           span only when limit is truthy) */
+           span only when limit is truthy), and the count itself freezes
+           at CUB's storage cap (500 free / 2000 premium) - raise it to
+           the richest backend the client can see, same dual-read as the
+           history row */
+        var REGISTER_TYPES = ['look', 'scheduled', 'book', 'like', 'wath', 'viewed', 'continued', 'thrown'];
+
+        function registerTypeByTitle(title) {
+            for (var i = 0; i < REGISTER_TYPES.length; i++) {
+                if (Lampa.Lang.translate('title_' + REGISTER_TYPES[i]) === title) return REGISTER_TYPES[i];
+            }
+            return null;
+        }
+
+        function categoryCount(type) {
+            var viaApi = 0;
+            var viaLocal = 0;
+            try { viaApi = (Lampa.Favorite.get({ type: type }) || []).length; } catch (e) {}
+            try {
+                var fav = Lampa.Storage.get('favorite', '{}');
+                if (fav && isArr(fav[type])) viaLocal = fav[type].length;
+            } catch (e) {}
+            return Math.max(viaApi, viaLocal);
+        }
+
         function fixRegisterLimits(lines) {
             if (!isArr(lines)) return;
             var register = findRegisterLine(lines);
             if (!register) return;
             for (var i = 0; i < register.length; i++) {
                 register[i].limit = 0;
+
+                var type = registerTypeByTitle(register[i].title);
+                if (type) {
+                    var real = categoryCount(type);
+                    if (real > register[i].count) register[i].count = real;
+                }
             }
         }
 
@@ -1923,7 +1963,7 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.7.0';
+    var PLUGIN_VERSION = '1.8.0';
 
     function safeInit(name, fn) {
         try { fn(); }
