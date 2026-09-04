@@ -16,9 +16,11 @@
      * row regenerates it. Chat is kept until cleared in Settings -> AI.
      *
      * Gemini: AI Studio endpoint (generativelanguage.googleapis.com),
-     * JSON-schema output. "Auto" model walks the free-tier cascade and
-     * falls through on 429/503/timeouts, plus 404/400 so retired models
-     * and thinking-config mismatches degrade instead of failing hard.
+     * JSON-schema output. "Auto" discovers the live model list from the
+     * API (cached a week), ranks flash-newest-first, and falls through on
+     * 429/503/timeouts/404/400 - so a model Google retires costs one hop
+     * instead of breaking the plugin. The model and thinking knob that
+     * actually answered are remembered and tried first from then on.
      * TMDB matching: Lampa's own TMDB pipeline (respects the user's
      * TMDB proxy) unless a personal key is set in Settings -> AI.
      * ================================================================ */
@@ -70,7 +72,7 @@
      * 2. Constants and settings access
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.5.0';
+    var PLUGIN_VERSION = '1.6.0';
     var COMPONENT_NAME = 'ai_recs_gemini'; /* 'ai_recommendations' is taken by a stock CUB component */
     var LIST_URL_MARKER = 'ai_recs_list_data';
     var CHAT_KEY = 'ai_rec_chat';
@@ -81,10 +83,18 @@
     var MAX_TURNS = 12;
     var LIBRARY_CAP = 200;    /* favorites lines included in the prompt */
 
+    /* seed order, used until the live model list is discovered */
     var GEMINI_CASCADE = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
     /* stored picks that Google removed from the API - reset to auto on boot */
     var GEMINI_RETIRED = ['gemini-2.5-pro', 'gemini-2.0-flash'];
+    var MODELS_KEY = 'ai_rec_models';
+    var MODEL_OK_KEY = 'ai_rec_model_ok';
+    var MODELS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    /* generateContent-capable text models only - everything else on the
+       endpoint (image/tts/audio/embedding/video/live/research) 400s here */
+    var MODEL_EXCLUDE = /(image|tts|audio|embedding|live|transcribe|robotics|computer-use|veo|lyria|banana|deep-research|antigravity|gemma|aqa|omni)/;
     var _stickyModel = null; /* the first cascade model that answered this session */
+    var _discovering = false;
 
     function enabled() {
         return Lampa.Storage.get('ai_rec_enabled', true) !== false;
@@ -154,40 +164,157 @@
         }
     };
 
+    /* Google retires models without notice (2.5-pro and 2.0-flash went
+       404 in 2026-09 and killed the whole hardcoded cascade), so the
+       live list is discovered from the API and cached for a week */
+    function usableModel(m) {
+        var name = ((m && m.name) || '').replace('models/', '');
+        if (name.indexOf('gemini-') !== 0) return false;
+        if (MODEL_EXCLUDE.test(name)) return false;
+        var methods = (m && m.supportedGenerationMethods) || [];
+        for (var i = 0; i < methods.length; i++) {
+            if (methods[i] === 'generateContent') return true;
+        }
+        return false;
+    }
+
+    /* flash before flash-lite before pro; concrete versions before the
+       moving "-latest" aliases; stable before preview; newest first */
+    function rankModels(names) {
+        function score(name) {
+            var ver = name.match(/^gemini-(\d+(?:\.\d+)?)/);
+            return {
+                name: name,
+                tier: name.indexOf('flash-lite') !== -1 ? 1 : (name.indexOf('flash') !== -1 ? 0 : (name.indexOf('pro') !== -1 ? 2 : 3)),
+                alias: /-latest$/.test(name) ? 1 : 0,
+                preview: name.indexOf('preview') !== -1 ? 1 : 0,
+                ver: ver ? parseFloat(ver[1]) : 0
+            };
+        }
+        var scored = [];
+        for (var i = 0; i < names.length; i++) scored.push(score(names[i]));
+        scored.sort(function (a, b) {
+            return (a.tier - b.tier) || (a.alias - b.alias) || (a.preview - b.preview) ||
+                (b.ver - a.ver) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+        });
+        var out = [];
+        for (var j = 0; j < scored.length; j++) out.push(scored[j].name);
+        return out;
+    }
+
+    /* newest-first is the right guess only until something answers:
+       the newest model is often the busiest (503) or the slowest, so
+       the model+knob that actually worked is remembered and tried
+       first from then on - re-learned automatically when it stops */
+    function okModel() {
+        var v = Lampa.Storage.get(MODEL_OK_KEY, '');
+        return (v && v.model) ? v : null;
+    }
+
+    function rememberOkModel(model, variant) {
+        Lampa.Storage.set(MODEL_OK_KEY, { model: model, variant: variant, ts: Date.now() });
+    }
+
+    function cachedModels() {
+        var c = Lampa.Storage.get(MODELS_KEY, '');
+        if (!c || !isArr(c.list) || !c.list.length) return null;
+        if (Date.now() - (c.ts || 0) > MODELS_TTL_MS) return null;
+        return c.list;
+    }
+
+    /* cb(listOrNull) - never fails the caller, the seed list still works */
+    function discoverModels(cb) {
+        if (_discovering || !geminiKey()) return cb(null);
+        _discovering = true;
+
+        xhrJson({
+            url: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=' +
+                encodeURIComponent(geminiKey()),
+            timeout: 15000
+        }, function (data) {
+            _discovering = false;
+            var names = [];
+            var arr = data && data.models;
+            if (isArr(arr)) {
+                for (var i = 0; i < arr.length; i++) {
+                    if (usableModel(arr[i])) names.push(arr[i].name.replace('models/', ''));
+                }
+            }
+            names = rankModels(names);
+            if (names.length) {
+                Lampa.Storage.set(MODELS_KEY, { ts: Date.now(), list: names });
+                console.log('AI Recommendations:', names.length, 'models discovered, preferred:', names.slice(0, 3).join(', '));
+            }
+            cb(names.length ? names : null);
+        }, function () {
+            _discovering = false;
+            cb(null);
+        });
+    }
+
     function geminiModels() {
         var setting = modelSetting();
         if (setting !== 'auto') return [setting];
-        if (_stickyModel) {
+
+        var list = cachedModels() || GEMINI_CASCADE.slice(0);
+        var ok = okModel();
+        var first = _stickyModel || (ok && ok.model) || null;
+        if (first) {
             var rest = [];
-            for (var i = 0; i < GEMINI_CASCADE.length; i++) {
-                if (GEMINI_CASCADE[i] !== _stickyModel) rest.push(GEMINI_CASCADE[i]);
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] !== first) rest.push(list[i]);
             }
-            return [_stickyModel].concat(rest);
+            return [first].concat(rest);
         }
-        return GEMINI_CASCADE.slice(0);
+        return list;
+    }
+
+    /* the no-thinking knob differs per generation and the wrong one is a
+       hard 400 (2.x wants thinkingBudget, 3.6 wants thinkingLevel, 3.8
+       rejects both), so try the fast form then the model's own default */
+    function thinkingVariants(model) {
+        if (model.indexOf('pro') !== -1) return [null];
+        if (/^gemini-2\./.test(model)) return [{ thinkingBudget: 0 }, null];
+        if (/^gemini-\d/.test(model)) return [{ thinkingLevel: 'minimal' }, null];
+        return [{ thinkingBudget: 0 }, { thinkingLevel: 'minimal' }, null];
     }
 
     /* ok(recsArray, modelName) / fail(messageKeyOrText) */
     function callGemini(contents, ok, fail) {
         var models = geminiModels();
         var auto = modelSetting() === 'auto';
+        var rediscovered = false;
 
-        function attempt(idx) {
-            if (idx >= models.length) return fail(translate('ai_rec_quota'));
+        function attempt(idx, vIdx) {
+            if (idx >= models.length) {
+                /* the whole list failed - it may predate a Google model
+                   retirement, so refresh it once and start over */
+                if (auto && !rediscovered) {
+                    rediscovered = true;
+                    return discoverModels(function (list) {
+                        if (!list) return fail(translate('ai_rec_quota'));
+                        models = list;
+                        _stickyModel = null;
+                        attempt(0);
+                    });
+                }
+                return fail(translate('ai_rec_quota'));
+            }
+
             var model = models[idx];
+            var variants = thinkingVariants(model);
+            if (typeof vIdx !== 'number') {
+                var known = okModel();
+                vIdx = (known && known.model === model && typeof known.variant === 'number') ? known.variant : 0;
+            }
+            var variant = variants[vIdx] || null;
             var cfg = {
                 responseMimeType: 'application/json',
                 responseSchema: GEMINI_SCHEMA,
                 temperature: 0.9,
                 maxOutputTokens: 8192
             };
-            /* keep flash models from spending latency on thinking, but
-               each generation takes a different knob: 2.x flash accepts
-               thinkingBudget 0, gemini-3.6-flash only thinkingLevel
-               "minimal" (3.8 rejects even that), pro can't disable it -
-               anything unrecognized is left on the model's default */
-            if (/^gemini-2\./.test(model) && model.indexOf('flash') !== -1) cfg.thinkingConfig = { thinkingBudget: 0 };
-            else if (model === 'gemini-3.6-flash') cfg.thinkingConfig = { thinkingLevel: 'minimal' };
+            if (variant) cfg.thinkingConfig = variant;
 
             xhrJson({
                 method: 'POST',
@@ -204,7 +331,10 @@
                     try { recs = JSON.parse(text); } catch (e) {}
                 }
                 if (isArr(recs) && recs.length) {
-                    if (auto) _stickyModel = model;
+                    if (auto) {
+                        _stickyModel = model;
+                        rememberOkModel(model, vIdx);
+                    }
                     ok(recs, model);
                 } else if (auto && idx + 1 < models.length) {
                     attempt(idx + 1);
@@ -212,8 +342,13 @@
                     fail(translate('ai_rec_error'));
                 }
             }, function (status) {
-                /* 429 quota / 503 overload / 0 network+timeout, plus
-                   404 retired model / 400 bad argument: walk the cascade */
+                /* a 400 is usually the thinking knob rather than the
+                   model, so retry the same model on its next variant */
+                if (auto && status === 400 && vIdx + 1 < variants.length) {
+                    return attempt(idx, vIdx + 1);
+                }
+                /* 429 quota / 503 overload / 0 network+timeout /
+                   404 retired model: move on to the next model */
                 if (auto && (status === 429 || status === 503 || status === 0 || status === 404 || status === 400)) {
                     if (_stickyModel === model) _stickyModel = null;
                     console.log('AI Recommendations:', model, 'failed (' + status + '), trying next model');
@@ -1142,20 +1277,20 @@
             onChange: function () { _stickyModel = null; }
         });
 
+        /* the fixed choices rot as Google retires models - offer what
+           discovery actually found, falling back to the seed list */
+        var modelValues = { 'auto': translate('ai_rec_model_auto') };
+        var knownModels = cachedModels() || GEMINI_CASCADE;
+        for (var mi = 0; mi < knownModels.length && mi < 10; mi++) {
+            modelValues[knownModels[mi]] = knownModels[mi];
+        }
+
         Lampa.SettingsApi.addParam({
             component: 'ai_recs',
             param: {
                 name: 'ai_rec_model',
                 type: 'select',
-                values: {
-                    'auto': translate('ai_rec_model_auto'),
-                    'gemini-3.6-flash': 'Gemini 3.6 Flash',
-                    'gemini-3.8-flash': 'Gemini 3.8 Flash',
-                    'gemini-flash-latest': 'Gemini Flash (latest)',
-                    'gemini-pro-latest': 'Gemini Pro (latest)',
-                    'gemini-2.5-flash': 'Gemini 2.5 Flash',
-                    'gemini-2.5-flash-lite': 'Gemini 2.5 Flash Lite'
-                },
+                values: modelValues,
                 default: 'auto'
             },
             field: { name: translate('ai_rec_model_name'), description: translate('ai_rec_model_descr') },
@@ -1191,6 +1326,10 @@
             console.log('AI Recommendations:', modelSetting(), 'was retired by Google, resetting model to auto');
             Lampa.Storage.set('ai_rec_model', 'auto');
         }
+
+        /* one call per week keeps the cascade current without waiting
+           for a failure to trigger discovery */
+        if (geminiKey() && !cachedModels()) discoverModels(function () {});
 
         Lampa.Manifest.plugins = {
             type: 'other',
