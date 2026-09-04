@@ -60,7 +60,8 @@
         mi_favs_reset_name: { en: 'Reset name', ru: 'Сбросить название' },
 
         mi_account_email_name: { en: 'Lampac account email', ru: 'Email аккаунта Lampac' },
-        mi_account_email_descr: { en: 'Identifies you on your Lampac server - bookmark sync and server backups are keyed to it and survive reinstalls (the device id does not)', ru: 'Идентифицирует вас на вашем сервере Lampac - синхронизация закладок и бэкапы на сервере привязаны к нему и переживают переустановку (ID устройства - нет)' }
+        mi_account_email_descr: { en: 'Identifies you on your Lampac server - bookmark sync and server backups are keyed to it and survive reinstalls (the device id does not)', ru: 'Идентифицирует вас на вашем сервере Lampac - синхронизация закладок и бэкапы на сервере привязаны к нему и переживают переустановку (ID устройства - нет)' },
+        mi_account_email_pushed: { en: 'Bookmarks sent to the Lampac server for this email', ru: 'Закладки отправлены на сервер Lampac для этого email' }
     });
 
     /* ================================================================
@@ -189,8 +190,45 @@
         Lampa.SettingsApi.addParam({
             component: 'my_interface',
             param: { name: 'account_email', type: 'input', values: '', placeholder: 'user@example.com', default: '' },
-            field: { name: translate('mi_account_email_name'), description: translate('mi_account_email_descr') }
+            field: { name: translate('mi_account_email_name'), description: translate('mi_account_email_descr') },
+            onChange: function (value) {
+                pushBookmarksToLampac(value);
+            }
         });
+    }
+
+    /* setting account_email switches the Lampac server identity (its
+       priority is token > account_email > uid), so a device's existing
+       bookmarks stay behind under the old uid identity and the next
+       pull overwrites local storage with the new identity's empty set.
+       Copy the CURRENT local set to the server under the new identity
+       the moment the email is entered - bookmark.js's own 'bookmark_set'
+       listener builds the request (correct host/token/uid params) and
+       POSTs /bookmark/set. No-op without Lampac's bookmark.js. */
+    function pushBookmarksToLampac(email) {
+        if (!((email || '') + '').replace(/^\s+|\s+$/g, '')) return;
+        if (!window.lampacBookmarkSyncInitialized) return;
+
+        try {
+            var raw = Lampa.Storage.get('favorite', '{}');
+            if (!raw || typeof raw !== 'object') return;
+
+            var payload = [];
+            for (var key in raw) {
+                if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+                var val = raw[key];
+                if (val === null || val === undefined) continue;
+                if (isArr(val) ? val.length > 0 : (typeof val === 'object' && Object.keys(val).length > 0)) {
+                    payload.push({ where: key, data: val });
+                }
+            }
+            if (!payload.length) return;
+
+            Lampa.Listener.send('lampac', { name: 'bookmark_set', value: payload });
+            Lampa.Noty.show(translate('mi_account_email_pushed'));
+        } catch (e) {
+            console.error('My Interface:', 'bookmark push failed -', e && e.message ? e.message : e);
+        }
     }
 
     /* ================================================================
@@ -1970,7 +2008,7 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.9.0';
+    var PLUGIN_VERSION = '1.10.0';
 
     function safeInit(name, fn) {
         try { fn(); }
