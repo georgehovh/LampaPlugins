@@ -17,7 +17,8 @@
      *
      * Gemini: AI Studio endpoint (generativelanguage.googleapis.com),
      * JSON-schema output. "Auto" model walks the free-tier cascade and
-     * falls through on 429/503/timeouts.
+     * falls through on 429/503/timeouts, plus 404/400 so retired models
+     * and thinking-config mismatches degrade instead of failing hard.
      * TMDB matching: Lampa's own TMDB pipeline (respects the user's
      * TMDB proxy) unless a personal key is set in Settings -> AI.
      * ================================================================ */
@@ -49,6 +50,7 @@
         ai_rec_loading: { en: 'Asking AI...', ru: 'Спрашиваю ИИ...' },
         ai_rec_error: { en: 'AI request failed', ru: 'Запрос к ИИ не удался' },
         ai_rec_quota: { en: 'Gemini quota exceeded, try later', ru: 'Квота Gemini исчерпана, попробуйте позже' },
+        ai_rec_model_gone: { en: 'This Gemini model was retired - set the model to Auto', ru: 'Эта модель Gemini больше недоступна - переключите модель на Авто' },
         ai_rec_nothing: { en: 'Could not match the recommendations on TMDB', ru: 'Не удалось сопоставить рекомендации с TMDB' }
     });
 
@@ -68,7 +70,7 @@
      * 2. Constants and settings access
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.3.0';
+    var PLUGIN_VERSION = '1.5.0';
     var COMPONENT_NAME = 'ai_recs_gemini'; /* 'ai_recommendations' is taken by a stock CUB component */
     var LIST_URL_MARKER = 'ai_recs_list_data';
     var CHAT_KEY = 'ai_rec_chat';
@@ -79,7 +81,9 @@
     var MAX_TURNS = 12;
     var LIBRARY_CAP = 200;    /* favorites lines included in the prompt */
 
-    var GEMINI_CASCADE = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+    var GEMINI_CASCADE = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+    /* stored picks that Google removed from the API - reset to auto on boot */
+    var GEMINI_RETIRED = ['gemini-2.5-pro', 'gemini-2.0-flash'];
     var _stickyModel = null; /* the first cascade model that answered this session */
 
     function enabled() {
@@ -177,9 +181,13 @@
                 temperature: 0.9,
                 maxOutputTokens: 8192
             };
-            /* keep flash models from spending latency on thinking;
-               2.5-pro cannot disable it, leave its default */
-            if (model.indexOf('pro') === -1) cfg.thinkingConfig = { thinkingBudget: 0 };
+            /* keep flash models from spending latency on thinking, but
+               each generation takes a different knob: 2.x flash accepts
+               thinkingBudget 0, gemini-3.6-flash only thinkingLevel
+               "minimal" (3.8 rejects even that), pro can't disable it -
+               anything unrecognized is left on the model's default */
+            if (/^gemini-2\./.test(model) && model.indexOf('flash') !== -1) cfg.thinkingConfig = { thinkingBudget: 0 };
+            else if (model === 'gemini-3.6-flash') cfg.thinkingConfig = { thinkingLevel: 'minimal' };
 
             xhrJson({
                 method: 'POST',
@@ -204,12 +212,14 @@
                     fail(translate('ai_rec_error'));
                 }
             }, function (status) {
-                /* 429 quota / 503 overload / 0 network+timeout: walk the cascade */
-                if (auto && (status === 429 || status === 503 || status === 0)) {
-                    if (auto && _stickyModel === model) _stickyModel = null;
+                /* 429 quota / 503 overload / 0 network+timeout, plus
+                   404 retired model / 400 bad argument: walk the cascade */
+                if (auto && (status === 429 || status === 503 || status === 0 || status === 404 || status === 400)) {
+                    if (_stickyModel === model) _stickyModel = null;
+                    console.log('AI Recommendations:', model, 'failed (' + status + '), trying next model');
                     return attempt(idx + 1);
                 }
-                fail(status === 429 ? translate('ai_rec_quota') : translate('ai_rec_error') + (status ? ' (' + status + ')' : ''));
+                fail(status === 429 ? translate('ai_rec_quota') : status === 404 ? translate('ai_rec_model_gone') : translate('ai_rec_error') + (status ? ' (' + status + ')' : ''));
             });
         }
 
@@ -273,7 +283,8 @@
     function basePrompt() {
         return 'You are a film recommendation engine.\n' +
             'The user\'s library - films and series they liked, bookmarked, planned or already watched. ' +
-            'This is the taste profile to base every recommendation on, and NOTHING from it may ever be recommended:\n' +
+            'Use it as the taste profile ONLY when asked for general recommendations; for a specific request follow the request alone. ' +
+            'Either way NOTHING from it may ever be recommended:\n' +
             promptList(libraryCards(), LIBRARY_CAP) + '\n\n' +
             'Rules for every answer in this conversation:\n' +
             '- Only real, existing titles that can be found on themoviedb.org.\n' +
@@ -317,13 +328,15 @@
     }
 
     function turnInstruction(prompt) {
-        return prompt + '\n\nRecommend exactly ' + LIST_TOTAL + ' NEW items for this request, following the same rules and JSON format.';
+        return prompt + '\n\nRecommend exactly ' + LIST_TOTAL + ' NEW items for this request, following the same rules and JSON format. ' +
+            'Base this answer ONLY on the request above - do NOT require similarity to my library, it is only an exclusion list here.';
     }
 
     function extendInstruction(state) {
         if (state.kind === 'movie') return 'Recommend exactly ' + EXTEND_COUNT + ' MORE movies (type "movie") based on my library, following the same rules and JSON format.';
         if (state.kind === 'tv') return 'Recommend exactly ' + EXTEND_COUNT + ' MORE TV series (type "tv") based on my library, following the same rules and JSON format.';
-        return 'Recommend exactly ' + EXTEND_COUNT + ' MORE items for my earlier request: "' + (state.prompt || '') + '", following the same rules and JSON format.';
+        return 'Recommend exactly ' + EXTEND_COUNT + ' MORE items for my earlier request: "' + (state.prompt || '') + '", following the same rules and JSON format. ' +
+            'Base them ONLY on that request - do NOT require similarity to my library, it is only an exclusion list here.';
     }
 
     /* ================================================================
@@ -1136,10 +1149,12 @@
                 type: 'select',
                 values: {
                     'auto': translate('ai_rec_model_auto'),
-                    'gemini-2.5-pro': 'Gemini 2.5 Pro',
+                    'gemini-3.6-flash': 'Gemini 3.6 Flash',
+                    'gemini-3.8-flash': 'Gemini 3.8 Flash',
+                    'gemini-flash-latest': 'Gemini Flash (latest)',
+                    'gemini-pro-latest': 'Gemini Pro (latest)',
                     'gemini-2.5-flash': 'Gemini 2.5 Flash',
-                    'gemini-2.5-flash-lite': 'Gemini 2.5 Flash Lite',
-                    'gemini-2.0-flash': 'Gemini 2.0 Flash'
+                    'gemini-2.5-flash-lite': 'Gemini 2.5 Flash Lite'
                 },
                 default: 'auto'
             },
@@ -1171,6 +1186,11 @@
 
     function startPlugin() {
         console.log('AI Recommendations', PLUGIN_VERSION, 'loaded');
+
+        if (GEMINI_RETIRED.indexOf(modelSetting()) !== -1) {
+            console.log('AI Recommendations:', modelSetting(), 'was retired by Google, resetting model to auto');
+            Lampa.Storage.set('ai_rec_model', 'auto');
+        }
 
         Lampa.Manifest.plugins = {
             type: 'other',
