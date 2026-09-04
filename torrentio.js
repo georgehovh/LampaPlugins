@@ -411,20 +411,27 @@
 
         var current = episode.params;
 
+        /* the KEY of the params.on map is the DOM event name the module
+           binds verbatim (render.on(key, ...)), so these must be the real
+           hover:* events - a plain 'enter' binds an event nothing fires.
+           The handler is called as (instance, data), so neither argument
+           is the episode itself; the closure is the reliable reference. */
         function decorate(params) {
             params = params || {};
             params.on = params.on || {};
 
-            if (!params.on.torrentio) {
-                params.on.torrentio = true;
-                params.on.focus = function (item) { snapshotViewed(item || episode); };
-                params.on.enter = function (item) {
-                    var data = item && item.episode_number ? item : episode;
-                    restoreViewed(data);
-                    openEpisode(movie, data);
-                };
-                params.on.long = function (item) { toggleViewed(item || episode); };
-            }
+            /* focus covers the remote, hover and touch cover a mouse or a
+               tap that reaches enter without focusing first */
+            params.on['hover:focus'] = function () { snapshotViewed(episode); };
+            params.on['hover:hover'] = function () { snapshotViewed(episode); };
+            params.on['hover:touch'] = function () { snapshotViewed(episode); };
+
+            params.on['hover:enter'] = function () {
+                restoreViewed(episode);
+                openEpisode(movie, episode);
+            };
+
+            params.on['hover:long'] = function () { toggleViewed(episode); };
 
             return params;
         }
