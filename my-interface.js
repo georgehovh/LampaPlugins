@@ -7,6 +7,14 @@
     var FAVS_STORAGE_KEY = 'my_interface_favs';
     var FAV_CATEGORIES = ['like', 'wath', 'book', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
 
+    /* stock settings folders that get folded into "Other" - the lang keys
+       are Lampa's own, so the names stay localized */
+    var GROUPED_SECTIONS = [
+        { component: 'parental_control', lang: 'title_parental_control' },
+        { component: 'data', lang: 'settings_rest_cache_all' },
+        { component: 'remote_configuration', lang: 'remote_configuration_settings_title' }
+    ];
+
     /* ================================================================
      * 0. Language strings (en + ru)
      * ================================================================ */
@@ -61,7 +69,10 @@
 
         mi_account_email_name: { en: 'Backup identifier', ru: 'Идентификатор бэкапа' },
         mi_account_email_descr: { en: 'Identifies you on your Lampac server - bookmark sync and server backups are keyed to it and survive reinstalls', ru: 'Идентифицирует вас на вашем сервере Lampac - синхронизация закладок и бэкапы на сервере привязаны к нему и переживают переустановку' },
-        mi_account_email_pushed: { en: 'Bookmarks sent to the Lampac server for this email', ru: 'Закладки отправлены на сервер Lampac для этого email' }
+        mi_account_email_pushed: { en: 'Bookmarks sent to the Lampac server for this email', ru: 'Закладки отправлены на сервер Lampac для этого email' },
+
+        mi_settings_group_name: { en: 'Fold extra sections into Other', ru: 'Свернуть лишние разделы в «Остальное»' },
+        mi_settings_group_descr: { en: 'Move Parental Control, Cache and Data and Remote Configuration out of the settings list and into the Other section', ru: 'Убрать «Родительский контроль», «Кэш и данные» и «Удалённую конфигурацию» из списка настроек в раздел «Остальное»' }
     });
 
     /* ================================================================
@@ -194,6 +205,12 @@
             onChange: function (value) {
                 pushBookmarksToLampac(value);
             }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'my_interface',
+            param: { name: 'mi_settings_group', type: 'trigger', default: true },
+            field: { name: translate('mi_settings_group_name'), description: translate('mi_settings_group_descr') }
         });
     }
 
@@ -1999,10 +2016,89 @@
     })();
 
     /* ================================================================
-     * 7. Boot
+     * 7. Settings tidy - the extra sections live inside "Other"
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.10.0';
+    var SettingsGroup = (function () {
+        var stash = {};
+
+        function on() {
+            return miEnabled('mi_settings_group');
+        }
+
+        /* Settings builds its folder list ONCE at app init (settings.js
+           calls main.create() from init) and only re-runs main.update() on
+           each open, so the folders are pruned from the live DOM on every
+           open rather than from the template - that also makes the toggle
+           take effect without a restart. update() runs BEFORE this event,
+           so anything restored here needs its handlers re-bound. */
+        function tidyMain(body) {
+            var hide = on();
+
+            GROUPED_SECTIONS.forEach(function (entry) {
+                var node = body.find('[data-component="' + entry.component + '"]');
+
+                if (hide) {
+                    if (!node.length) return;
+
+                    if (!stash[entry.component]) stash[entry.component] = node.prop('outerHTML');
+
+                    node.remove();
+                    return;
+                }
+
+                if (node.length || !stash[entry.component]) return;
+
+                var more = body.find('[data-component="more"]');
+
+                if (more.length) more.before(stash[entry.component]);
+                else body.append(stash[entry.component]);
+
+                try { Lampa.Settings.main().update(); }
+                catch (e) { console.error('My Interface: settings re-bind -', e); }
+            });
+        }
+
+        function openSection(component) {
+            Lampa.Settings.create(component, {
+                onBack: function () {
+                    Lampa.Settings.create('more');
+                }
+            });
+        }
+
+        function init() {
+            GROUPED_SECTIONS.forEach(function (entry) {
+                Lampa.SettingsApi.addParam({
+                    component: 'more',
+                    param: { name: 'mi_open_' + entry.component, type: 'button' },
+                    field: { name: translate(entry.lang) },
+                    onRender: function (item) {
+                        /* addParams re-renders on every open, so this keeps
+                           the buttons in step with the trigger */
+                        item.toggleClass('hide', !on());
+                    },
+                    onChange: function () {
+                        openSection(entry.component);
+                    }
+                });
+            });
+
+            Lampa.Settings.listener.follow('open', function (e) {
+                if (e.name === 'main' && e.body) tidyMain(e.body);
+            });
+        }
+
+        return {
+            init: init
+        };
+    })();
+
+    /* ================================================================
+     * 8. Boot
+     * ================================================================ */
+
+    var PLUGIN_VERSION = '1.11.0';
 
     function safeInit(name, fn) {
         try { fn(); }
@@ -2035,6 +2131,7 @@
         safeInit('all-buttons', initAllButtons);
         safeInit('ratings', initRatings);
         safeInit('favorites', MyFavorites.init);
+        safeInit('settings-group', SettingsGroup.init);
     }
 
     if (window.appready) startPlugin();
