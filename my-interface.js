@@ -1862,12 +1862,6 @@
             if (!register) return;
             for (var i = 0; i < register.length; i++) {
                 register[i].limit = 0;
-
-                var type = registerTypeByTitle(register[i].title);
-                if (type) {
-                    var real = categoryCount(type);
-                    if (real > register[i].count) register[i].count = real;
-                }
             }
         }
 
