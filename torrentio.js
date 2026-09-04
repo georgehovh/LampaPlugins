@@ -10,7 +10,7 @@
     if (window.torrentio_plugin) return;
     window.torrentio_plugin = true;
 
-    var PLUGIN_VERSION = '1.1.0';
+    var PLUGIN_VERSION = '1.2.0';
 
     var HOST = 'https://torrentio.strem.fun';
     var PROVIDERS = 'thepiratebay,yts,eztv,1337x,torrentgalaxy,rutor,rutracker';
@@ -59,6 +59,11 @@
 
         torrentio_episodes_name: { en: 'Torrents per episode', ru: 'Торренты по эпизодам' },
         torrentio_episodes_descr: { en: 'Press an episode to open the torrents found for it - on the film card and on the seasons page. Long press marks it watched instead', ru: 'Нажатие на эпизод открывает найденные для него торренты - в карточке фильма и на странице сезонов. Долгое нажатие отмечает просмотренным' },
+
+        torrentio_episode_mode_name: { en: 'Episode page shows', ru: 'На странице эпизода показывать' },
+        torrentio_episode_mode_descr: { en: 'What to list when an episode is opened from the series page', ru: 'Что показывать при открытии эпизода из карточки сериала' },
+        torrentio_mode_filter: { en: 'Everything matching that episode', ru: 'Всё, что относится к этому эпизоду' },
+        torrentio_mode_only: { en: 'Torrentio results only', ru: 'Только результаты Torrentio' },
 
         torrentio_episode_empty: { en: 'Nothing found for this episode', ru: 'Для этого эпизода ничего не найдено' }
     });
@@ -235,6 +240,109 @@
         return [streamUrl(imdb, 1, 1)];
     }
 
+    /* ================================================================
+     * 3. Narrowing a torrent list down to one episode
+     * ================================================================ */
+
+    /* Lampa's own TitleParser is not exported, and its episode field means
+       "how many episodes are in this release" rather than "which" - so the
+       season and episode ranges are read here instead. A release with no
+       episode marking at all is a pack and counts as containing it. */
+    function releaseSeasons(title) {
+        var seasons = [];
+        var m;
+        var i;
+
+        m = /\bs(\d{1,2})\s*[-–]\s*s?(\d{1,2})\b/.exec(title) ||
+            /(?:сезон|season)\s*(\d{1,2})\s*[-–]\s*(\d{1,2})/.exec(title) ||
+            /(\d{1,2})\s*[-–]\s*(\d{1,2})\s*(?:сезон|season)/.exec(title);
+
+        if (m) {
+            for (i = parseInt(m[1], 10); i <= parseInt(m[2], 10) && seasons.length < 40; i++) seasons.push(i);
+            return seasons;
+        }
+
+        m = /\bs(\d{1,2})\s*e\d{1,3}/.exec(title) ||
+            /(\d{1,2})\s*(?:сезон|season)/.exec(title) ||
+            /(?:сезон|season)\s*(\d{1,2})/.exec(title) ||
+            /\b(\d{1,2})x\d{1,2}\b/.exec(title) ||
+            /\bs(\d{1,2})\b/.exec(title);
+
+        if (m) seasons.push(parseInt(m[1], 10));
+
+        return seasons;
+    }
+
+    function releaseEpisodes(title) {
+        var m = /s\d{1,2}\s*e(\d{1,3})\s*[-–]\s*e?(\d{1,3})/.exec(title) ||
+                /\b\d{1,2}x(\d{1,2})\s*[-–]\s*(\d{1,2})\b/.exec(title) ||
+                /(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:сери|episode)/.exec(title) ||
+                /(?:сери[яийї]|episodes?)\s*(\d{1,3})\s*[-–]\s*(\d{1,3})/.exec(title);
+
+        if (m) return [parseInt(m[1], 10), parseInt(m[2], 10)];
+
+        /* "12 из 12", "1- из 10" - N episodes of M are inside */
+        m = /(\d{1,3})\s*(?:из|of|з)\s*(\d{1,3})/.exec(title);
+        if (m) return [1, parseInt(m[1], 10)];
+
+        /* word-first has to be tried BEFORE number-first, or "season 1
+           episode 3" reads the season as the episode number */
+        m = /s\d{1,2}\s*e(\d{1,3})/.exec(title) ||
+            /\b\d{1,2}x(\d{1,2})\b/.exec(title) ||
+            /(?:сери[яийї]|episode)\s*(\d{1,3})/.exec(title) ||
+            /(\d{1,3})\s*(?:сери[яийї]|episode)\b/.exec(title) ||
+            /\be(\d{1,3})\b/.exec(title);
+
+        if (m) return [parseInt(m[1], 10), parseInt(m[1], 10)];
+
+        return null;
+    }
+
+    function releaseHasEpisode(title, season, episode) {
+        title = (title || '').toLowerCase();
+
+        var seasons = releaseSeasons(title);
+        if (seasons.length && seasons.indexOf(season) === -1) return false;
+
+        var range = releaseEpisodes(title);
+        if (!range) return true;
+
+        /* a year range is not an episode range */
+        if (range[0] >= 1900 || range[1] >= 1900) return true;
+
+        var from = Math.min(range[0], range[1]);
+        var to = Math.max(range[0], range[1]);
+
+        return episode >= from && episode <= to;
+    }
+
+    function narrowToEpisode(data, params) {
+        var target = params.torrentio;
+        if (!target || !target.season || !isArr(data.Results)) return;
+
+        var only = Lampa.Storage.get('torrentio_episode_mode', 'filter') === 'only';
+        var kept = [];
+        var dropped = 0;
+        var i;
+
+        for (i = 0; i < data.Results.length; i++) {
+            var row = data.Results[i];
+
+            /* our own rows were asked for by episode already */
+            if (row.info_hash) {
+                kept.push(row);
+                continue;
+            }
+
+            if (!only && releaseHasEpisode(row.Title, target.season, target.episode)) kept.push(row);
+            else dropped++;
+        }
+
+        if (dropped) console.log('Torrentio: episode filter dropped', dropped, 'of', data.Results.length, 'rows');
+
+        data.Results = kept;
+    }
+
     function append(params, data, call) {
         if (!data) data = { Results: [] };
         if (!isArr(data.Results)) data.Results = [];
@@ -280,7 +388,7 @@
     }
 
     /* ================================================================
-     * 3. Parser hook
+     * 4. Parser hook
      * ================================================================ */
 
     /* app.js exports Parser into the global map and torrents.js calls
@@ -300,18 +408,25 @@
         Lampa.Parser.get = function (params, oncomplite, onerror) {
             var args = params || {};
 
+            function done(data) {
+                try { narrowToEpisode(data, args); }
+                catch (e) { console.error('Torrentio: episode filter -', e && e.stack ? e.stack : e); }
+
+                oncomplite(data);
+            }
+
             orig.call(Lampa.Parser, args, function (data) {
                 try {
-                    append(args, data, oncomplite);
+                    append(args, data, done);
                 } catch (e) {
                     console.error('Torrentio:', e && e.stack ? e.stack : e);
-                    oncomplite(data);
+                    done(data);
                 }
             }, function (err) {
                 /* a dead jackett host should not empty the whole list */
                 try {
                     append(args, { Results: [] }, function (data) {
-                        if (data.Results.length) oncomplite(data);
+                        if (data.Results.length) done(data);
                         else onerror(err);
                     });
                 } catch (e) {
@@ -322,25 +437,48 @@
     }
 
     /* ================================================================
-     * 4. Episode banners - film card row and the "More" seasons page
+     * 5. Episode banners - film card row and the "More" seasons page
      * ================================================================ */
+
+    /* the stock Torrents button builds its query from parse_lang - an
+       episode page asks the SAME question (an "Game of Thrones S01E03"
+       query finds almost nothing on the russian trackers) and narrows the
+       answer down to the episode afterwards */
+    function searchQuery(movie) {
+        var original = movie.original_name || movie.original_title || movie.name || movie.title || '';
+        var local = movie.name || movie.title || original;
+        var year = ((movie.first_air_date || movie.release_date || '0000') + '').slice(0, 4);
+
+        var combinations = {
+            df: original,
+            df_year: original + ' ' + year,
+            df_lg: original + ' ' + local,
+            df_lg_year: original + ' ' + local + ' ' + year,
+
+            lg: local,
+            lg_year: local + ' ' + year,
+            lg_df: local + ' ' + original,
+            lg_df_year: local + ' ' + original + ' ' + year
+        };
+
+        var lang;
+        try { lang = Lampa.Storage.field('parse_lang'); }
+        catch (e) { lang = null; }
+
+        return combinations[lang] || original || local;
+    }
 
     function openEpisode(movie, episode) {
         var season = episode.season_number;
         var number = episode.episode_number;
-        var tag = 'S' + pad(season) + 'E' + pad(number);
-
-        var original = movie.original_name || movie.original_title || movie.name || movie.title || '';
-        var local = movie.name || movie.title || original;
 
         Lampa.Activity.push({
             url: '',
-            title: Lampa.Lang.translate('title_torrents') + ' - ' + tag,
+            title: Lampa.Lang.translate('title_torrents') + ' - S' + pad(season) + 'E' + pad(number),
             component: 'torrents',
-            search: original + ' ' + tag,
-            search_one: local + ' ' + tag,
-            search_two: original + ' ' + tag,
-            clarification: true,
+            search: searchQuery(movie),
+            search_one: movie.name || movie.title || '',
+            search_two: movie.original_name || movie.original_title || '',
             movie: movie,
             page: 1,
             torrentio: { season: season, episode: number }
@@ -513,7 +651,7 @@
     }
 
     /* ================================================================
-     * 5. Settings
+     * 6. Settings
      * ================================================================ */
 
     function initSettings() {
@@ -541,13 +679,27 @@
 
         Lampa.SettingsApi.addParam({
             component: 'torrentio',
+            param: {
+                name: 'torrentio_episode_mode',
+                type: 'select',
+                values: {
+                    filter: Lampa.Lang.translate('torrentio_mode_filter'),
+                    only: Lampa.Lang.translate('torrentio_mode_only')
+                },
+                default: 'filter'
+            },
+            field: { name: Lampa.Lang.translate('torrentio_episode_mode_name'), description: Lampa.Lang.translate('torrentio_episode_mode_descr') }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'torrentio',
             param: { name: 'torrentio_providers', type: 'input', values: '', placeholder: PROVIDERS, default: '' },
             field: { name: Lampa.Lang.translate('torrentio_providers_name'), description: Lampa.Lang.translate('torrentio_providers_descr') }
         });
     }
 
     /* ================================================================
-     * 6. Boot
+     * 7. Boot
      * ================================================================ */
 
     function safeInit(name, fn) {
