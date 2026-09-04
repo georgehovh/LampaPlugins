@@ -59,8 +59,8 @@
         mi_favs_show: { en: 'Show', ru: 'Показывать' },
         mi_favs_reset_name: { en: 'Reset name', ru: 'Сбросить название' },
 
-        mi_account_email_name: { en: 'Lampac account email', ru: 'Email аккаунта Lampac' },
-        mi_account_email_descr: { en: 'Identifies you on your Lampac server - bookmark sync and server backups are keyed to it and survive reinstalls (the device id does not)', ru: 'Идентифицирует вас на вашем сервере Lampac - синхронизация закладок и бэкапы на сервере привязаны к нему и переживают переустановку (ID устройства - нет)' },
+        mi_account_email_name: { en: 'Backup identifier', ru: 'Идентификатор бэкапа' },
+        mi_account_email_descr: { en: 'Identifies you on your Lampac server - bookmark sync and server backups are keyed to it and survive reinstalls', ru: 'Идентифицирует вас на вашем сервере Lampac - синхронизация закладок и бэкапы на сервере привязаны к нему и переживают переустановку' },
         mi_account_email_pushed: { en: 'Bookmarks sent to the Lampac server for this email', ru: 'Закладки отправлены на сервер Lampac для этого email' }
     });
 
