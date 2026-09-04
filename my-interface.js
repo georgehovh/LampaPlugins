@@ -1579,9 +1579,25 @@
             F.__mi_favs_patched = true;
 
             var origAll = F.all;
+            var origGet = F.get;
 
+            /* single-category callers (the favorite list pages) */
+            if (origGet) F.get = function (params) {
+                var res = origGet.apply(F, arguments);
+                if (params && params.type && LIBRARY_TYPES.indexOf(params.type) >= 0) {
+                    return richerCards(params.type, res);
+                }
+                return res;
+            };
+
+            /* the Bookmarks page (rows + register counts) builds from
+               all(), which calls the module-INTERNAL get - the get
+               wrapper above never sees it, so enrich here too */
             if (origAll) F.all = function () {
                 var res = origAll.apply(F, arguments);
+                LIBRARY_TYPES.forEach(function (type) {
+                    if (res[type]) res[type] = richerCards(type, res[type]);
+                });
                 state.defaults.hidden.forEach(function (type) {
                     if (res[type]) res[type] = [];
                 });
@@ -1653,30 +1669,43 @@
             });
         }
 
-        function localHistoryCards() {
+        var LIBRARY_TYPES = ['like', 'wath', 'book', 'history', 'look', 'viewed', 'scheduled', 'continued', 'thrown'];
+
+        function localCategoryCards(type) {
             var fav = Lampa.Storage.get('favorite', '{}');
             if (!fav || typeof fav !== 'object') return [];
 
-            var ids = isArr(fav.history) ? fav.history : [];
+            var ids = isArr(fav[type]) ? fav[type] : [];
             var cards = isArr(fav.card) ? fav.card : [];
+            var map = {};
             var result = [];
 
+            for (var j = 0; j < cards.length; j++) {
+                if (cards[j] && cards[j].id !== undefined) map['m' + cards[j].id] = cards[j];
+            }
             for (var i = 0; i < ids.length; i++) {
-                for (var j = 0; j < cards.length; j++) {
-                    if (String(cards[j].id) === String(ids[i])) {
-                        result.push(cards[j]);
-                        break;
-                    }
-                }
+                var card = map['m' + ids[i]];
+                if (card) result.push(card);
             }
             return result;
+        }
+
+        /* sync backends (CUB) cap what they store per category (500
+           free / 2000 premium) - serve whichever of backend vs local
+           storage holds more */
+        function richerCards(type, viaApi) {
+            var api = isArr(viaApi) ? viaApi : [];
+            try {
+                var local = localCategoryCards(type);
+                if (local.length > api.length) return local;
+            } catch (e) {}
+            return api;
         }
 
         function historyCards() {
             var viaApi = [];
             try { viaApi = Lampa.Favorite.get({ type: 'history' }) || []; } catch (e) {}
-            var viaLocal = localHistoryCards();
-            return viaApi.length >= viaLocal.length ? viaApi : viaLocal;
+            return richerCards('history', viaApi);
         }
 
         function openCard(item) {
@@ -1787,30 +1816,8 @@
 
         /* under CUB sync the category buttons render "3 / 500" - show
            just the count (register/module/line.js appends the "/ limit"
-           span only when limit is truthy), and the count itself freezes
-           at CUB's storage cap (500 free / 2000 premium) - raise it to
-           the richest backend the client can see, same dual-read as the
-           history row */
-        var REGISTER_TYPES = ['look', 'scheduled', 'book', 'like', 'wath', 'viewed', 'continued', 'thrown'];
-
-        function registerTypeByTitle(title) {
-            for (var i = 0; i < REGISTER_TYPES.length; i++) {
-                if (Lampa.Lang.translate('title_' + REGISTER_TYPES[i]) === title) return REGISTER_TYPES[i];
-            }
-            return null;
-        }
-
-        function categoryCount(type) {
-            var viaApi = 0;
-            var viaLocal = 0;
-            try { viaApi = (Lampa.Favorite.get({ type: type }) || []).length; } catch (e) {}
-            try {
-                var fav = Lampa.Storage.get('favorite', '{}');
-                if (fav && isArr(fav[type])) viaLocal = fav[type].length;
-            } catch (e) {}
-            return Math.max(viaApi, viaLocal);
-        }
-
+           span only when limit is truthy); the counts themselves are
+           uncapped by the hookFavorite() richer-list wrappers */
         function fixRegisterLimits(lines) {
             if (!isArr(lines)) return;
             var register = findRegisterLine(lines);
@@ -1963,7 +1970,7 @@
      * 7. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.8.0';
+    var PLUGIN_VERSION = '1.9.0';
 
     function safeInit(name, fn) {
         try { fn(); }

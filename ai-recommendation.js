@@ -70,7 +70,7 @@
      * 2. Constants and settings access
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.4.0';
+    var PLUGIN_VERSION = '1.5.0';
     var COMPONENT_NAME = 'ai_recs_gemini'; /* 'ai_recommendations' is taken by a stock CUB component */
     var LIST_URL_MARKER = 'ai_recs_list_data';
     var CHAT_KEY = 'ai_rec_chat';
@@ -283,7 +283,8 @@
     function basePrompt() {
         return 'You are a film recommendation engine.\n' +
             'The user\'s library - films and series they liked, bookmarked, planned or already watched. ' +
-            'This is the taste profile to base every recommendation on, and NOTHING from it may ever be recommended:\n' +
+            'Use it as the taste profile ONLY when asked for general recommendations; for a specific request follow the request alone. ' +
+            'Either way NOTHING from it may ever be recommended:\n' +
             promptList(libraryCards(), LIBRARY_CAP) + '\n\n' +
             'Rules for every answer in this conversation:\n' +
             '- Only real, existing titles that can be found on themoviedb.org.\n' +
@@ -327,13 +328,15 @@
     }
 
     function turnInstruction(prompt) {
-        return prompt + '\n\nRecommend exactly ' + LIST_TOTAL + ' NEW items for this request, following the same rules and JSON format.';
+        return prompt + '\n\nRecommend exactly ' + LIST_TOTAL + ' NEW items for this request, following the same rules and JSON format. ' +
+            'Base this answer ONLY on the request above - do NOT require similarity to my library, it is only an exclusion list here.';
     }
 
     function extendInstruction(state) {
         if (state.kind === 'movie') return 'Recommend exactly ' + EXTEND_COUNT + ' MORE movies (type "movie") based on my library, following the same rules and JSON format.';
         if (state.kind === 'tv') return 'Recommend exactly ' + EXTEND_COUNT + ' MORE TV series (type "tv") based on my library, following the same rules and JSON format.';
-        return 'Recommend exactly ' + EXTEND_COUNT + ' MORE items for my earlier request: "' + (state.prompt || '') + '", following the same rules and JSON format.';
+        return 'Recommend exactly ' + EXTEND_COUNT + ' MORE items for my earlier request: "' + (state.prompt || '') + '", following the same rules and JSON format. ' +
+            'Base them ONLY on that request - do NOT require similarity to my library, it is only an exclusion list here.';
     }
 
     /* ================================================================
