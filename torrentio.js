@@ -10,7 +10,7 @@
     if (window.torrentio_plugin) return;
     window.torrentio_plugin = true;
 
-    var PLUGIN_VERSION = '1.2.0';
+    var PLUGIN_VERSION = '1.3.0';
 
     var HOST = 'https://torrentio.strem.fun';
     var PROVIDERS = 'thepiratebay,yts,eztv,1337x,torrentgalaxy,rutor,rutracker';
@@ -247,24 +247,30 @@
     /* Lampa's own TitleParser is not exported, and its episode field means
        "how many episodes are in this release" rather than "which" - so the
        season and episode ranges are read here instead. A release with no
-       episode marking at all is a pack and counts as containing it. */
+       episode marking at all is a pack and counts as containing it.
+
+       Every bare number group is \b-anchored: without that, the year in
+       "Game of Thrones 2011 Season 1" is read as season 11 and the row is
+       dropped from its own episode page. */
     function releaseSeasons(title) {
         var seasons = [];
         var m;
         var i;
 
         m = /\bs(\d{1,2})\s*[-–]\s*s?(\d{1,2})\b/.exec(title) ||
-            /(?:сезон|season)\s*(\d{1,2})\s*[-–]\s*(\d{1,2})/.exec(title) ||
-            /(\d{1,2})\s*[-–]\s*(\d{1,2})\s*(?:сезон|season)/.exec(title);
+            /(?:сезон|season)\s*(\d{1,2})\s*[-–]\s*(\d{1,2})\b/.exec(title) ||
+            /\b(\d{1,2})\s*[-–]\s*(\d{1,2})\s*(?:сезон|season)/.exec(title);
 
         if (m) {
             for (i = parseInt(m[1], 10); i <= parseInt(m[2], 10) && seasons.length < 40; i++) seasons.push(i);
             return seasons;
         }
 
+        /* number-before-word stays FIRST - "1 сезон 10 серия" must read as
+           season 1, not season 10 - and the \b is what keeps a year out */
         m = /\bs(\d{1,2})\s*e\d{1,3}/.exec(title) ||
-            /(\d{1,2})\s*(?:сезон|season)/.exec(title) ||
-            /(?:сезон|season)\s*(\d{1,2})/.exec(title) ||
+            /\b(\d{1,2})\s*(?:сезон|season)/.exec(title) ||
+            /(?:сезон|season)\s*(\d{1,2})\b/.exec(title) ||
             /\b(\d{1,2})x\d{1,2}\b/.exec(title) ||
             /\bs(\d{1,2})\b/.exec(title);
 
@@ -276,21 +282,21 @@
     function releaseEpisodes(title) {
         var m = /s\d{1,2}\s*e(\d{1,3})\s*[-–]\s*e?(\d{1,3})/.exec(title) ||
                 /\b\d{1,2}x(\d{1,2})\s*[-–]\s*(\d{1,2})\b/.exec(title) ||
-                /(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:сери|episode)/.exec(title) ||
-                /(?:сери[яийї]|episodes?)\s*(\d{1,3})\s*[-–]\s*(\d{1,3})/.exec(title);
+                /\b(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(?:сери|episode)/.exec(title) ||
+                /(?:сери[яийї]|episodes?)\s*(\d{1,3})\s*[-–]\s*(\d{1,3})\b/.exec(title);
 
         if (m) return [parseInt(m[1], 10), parseInt(m[2], 10)];
 
         /* "12 из 12", "1- из 10" - N episodes of M are inside */
-        m = /(\d{1,3})\s*(?:из|of|з)\s*(\d{1,3})/.exec(title);
+        m = /\b(\d{1,3})\s*(?:из|of|з)\s*(\d{1,3})\b/.exec(title);
         if (m) return [1, parseInt(m[1], 10)];
 
         /* word-first has to be tried BEFORE number-first, or "season 1
            episode 3" reads the season as the episode number */
         m = /s\d{1,2}\s*e(\d{1,3})/.exec(title) ||
             /\b\d{1,2}x(\d{1,2})\b/.exec(title) ||
-            /(?:сери[яийї]|episode)\s*(\d{1,3})/.exec(title) ||
-            /(\d{1,3})\s*(?:сери[яийї]|episode)\b/.exec(title) ||
+            /(?:сери[яийї]|episode)\s*(\d{1,3})\b/.exec(title) ||
+            /\b(\d{1,3})\s*(?:сери[яийї]|episode)(?![a-z])/.exec(title) ||
             /\be(\d{1,3})\b/.exec(title);
 
         if (m) return [parseInt(m[1], 10), parseInt(m[1], 10)];
@@ -314,6 +320,54 @@
         var to = Math.max(range[0], range[1]);
 
         return episode >= from && episode <= to;
+    }
+
+    /* ================================================================
+     * 3b. Keeping the stock sort honest
+     * ================================================================ */
+
+    /* torrents.js sorts a series by general.season DESCENDING by default, and
+       its TitleParser reads "Game of Thrones 2011 Season 1" as season 2011
+       (/(\d+)\s*season/ takes the year) - one such row jumps over the entire
+       list. The component ASSIGNS element.general itself right after the
+       parser returns, so a pre-set value would be thrown away; the correction
+       goes in a SETTER instead. Only an impossible season (a year) is
+       touched, so a correctly parsed row is left exactly as stock made it. */
+    function repairGeneral(parsed, title) {
+        if (!parsed) return parsed;
+
+        var first = parseInt(String(parsed.season).split('-')[0], 10);
+        if (!(first >= 1900)) return parsed;
+
+        var found = releaseSeasons((title || '').toLowerCase());
+        if (!found.length) found = [1];
+
+        parsed.season = found.length > 1 ? found[0] + '-' + found[found.length - 1] : found[0];
+        parsed.seasons = found;
+
+        return parsed;
+    }
+
+    function guardGeneral(rows) {
+        for (var i = 0; i < rows.length; i++) {
+            guardRow(rows[i]);
+        }
+    }
+
+    function guardRow(row) {
+        var value;
+
+        try {
+            Object.defineProperty(row, 'general', {
+                configurable: true,
+                enumerable: true,
+                get: function () { return value; },
+                set: function (parsed) { value = repairGeneral(parsed, row.Title); }
+            });
+        }
+        catch (e) {
+            /* a sealed row keeps whatever stock parsed */
+        }
     }
 
     function narrowToEpisode(data, params) {
@@ -411,6 +465,11 @@
             function done(data) {
                 try { narrowToEpisode(data, args); }
                 catch (e) { console.error('Torrentio: episode filter -', e && e.stack ? e.stack : e); }
+
+                try {
+                    if (enabled('torrentio_enabled') && isArr(data.Results)) guardGeneral(data.Results);
+                }
+                catch (e) { console.error('Torrentio: season guard -', e && e.stack ? e.stack : e); }
 
                 oncomplite(data);
             }
@@ -651,6 +710,34 @@
     }
 
     /* ================================================================
+     * 5b. Re-sorting a long list
+     * ================================================================ */
+
+    /* Changing the sort (or the filter) re-renders rows 0-19 but never resets
+       object.page, so torrents.js next() carries on from wherever the user
+       had scrolled to and the rows in between are never appended - visible as
+       "the sort dropped half my list" on any list past 20 rows, which is most
+       of them once Torrentio has added its 50. Both paths write the choice to
+       storage BEFORE re-rendering, and Activity.active() returns that very
+       activity object, so a change listener is enough to put the page back. */
+    function hookSortPaging() {
+        if (!Lampa.Storage.listener || typeof Lampa.Storage.listener.follow !== 'function') return;
+
+        Lampa.Storage.listener.follow('change', function (e) {
+            if (!e || (e.name !== 'torrents_sort' && e.name !== 'torrents_filter')) return;
+
+            try {
+                var activity = Lampa.Activity.active();
+
+                if (activity && activity.component === 'torrents' && activity.page > 1) activity.page = 1;
+            }
+            catch (err) {
+                console.error('Torrentio: page reset -', err && err.stack ? err.stack : err);
+            }
+        });
+    }
+
+    /* ================================================================
      * 6. Settings
      * ================================================================ */
 
@@ -716,6 +803,7 @@
         safeInit('parser', hookParser);
         safeInit('episodes', hookFullCard);
         safeInit('seasons', hookSeasons);
+        safeInit('paging', hookSortPaging);
     }
 
     if (window.appready) startPlugin();
