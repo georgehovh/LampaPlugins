@@ -1996,6 +1996,42 @@
             });
         }
 
+        /* STOCK TRIMS BROWSING HISTORY TO 100 ON EVERY PLAY. Both playback
+           entry points call `Favorite.add('history', movie, 100)` (the android
+           torrent hand-off and the internal player/TorrServer path), and
+           Favorite.add treats a truthy limit as "delete everything past this
+           index", one remove() per entry. Each remove fires the favorite
+           listener, so Lampac's bookmark.js mirrors every deletion to the
+           server DB - the history is gone on the device AND on the server,
+           and remove() also drops each card object once nothing references
+           it. That is what ate 420 of Georgi's 500 restored history entries
+           on 2026-09-04, the first time he started playback after the
+           CUB -> Lampac migration. History is therefore never trimmed, with
+           no setting to get it wrong (his call, 2026-09-04).
+
+           Both call sites reach Favorite.add as a PROPERTY of the shared
+           module object (the same object exported as Lampa.Favorite), so a
+           property wrap does see them - unlike the all()/get() case, where
+           all() calls a closure-local get() that no wrap can reach. */
+        function hookHistoryLimit() {
+            var F = Lampa.Favorite;
+            if (!F || typeof F.add !== 'function' || F.add.mi_history_limit) return;
+
+            var orig = F.add;
+
+            /* stock guards the trim with `if (limit)`, so a falsy limit means
+               never trim - history is kept in full, every other list keeps
+               whatever cap its caller asked for */
+            var wrapped = function (where, card, limit) {
+                if (where === 'history') limit = 0;
+
+                return orig.apply(F, [where, card, limit]);
+            };
+
+            wrapped.mi_history_limit = true;
+            F.add = wrapped;
+        }
+
         function init() {
             if (window.my_interface_favs_ready) return;
             window.my_interface_favs_ready = true;
@@ -2004,6 +2040,7 @@
 
             hookLang();
             hookFavorite();
+            hookHistoryLimit();
             hookSelect();
             hookContentRowsCall();
             registerHistoryRow();
@@ -2098,7 +2135,7 @@
      * 8. Boot
      * ================================================================ */
 
-    var PLUGIN_VERSION = '1.11.0';
+    var PLUGIN_VERSION = '1.12.0';
 
     function safeInit(name, fn) {
         try { fn(); }
